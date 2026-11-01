@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import {
   zcodeEnterpriseToolAuthorizationParamsSchema,
   zcodeEnterpriseToolAuthorizationCancelledSchema,
@@ -47,11 +48,20 @@ const modelWorkspaceKey = (workspace: ZCodeWorkspaceRef) =>
     workspace.workspacePath,
   ]);
 function sameWorkspace(left: ZCodeWorkspaceRef, right: ZCodeWorkspaceRef) {
-  return (
-    left.workspaceKey === right.workspaceKey &&
-    left.workspacePath === right.workspacePath &&
-    (left.workspaceIdentity?.trim() ?? "") === (right.workspaceIdentity?.trim() ?? "")
-  );
+  const identity = (value: ZCodeWorkspaceRef) => value.workspaceIdentity?.trim() ?? "";
+  if (identity(left) !== identity(right)) return false;
+  if (left.workspaceKey === right.workspaceKey && left.workspacePath === right.workspacePath)
+    return true;
+  // 符号链接会让同一个工作区出现两种字面路径（例如 macOS 的 /tmp -> /private/tmp：
+  // 子进程 realpath 后上报规范路径，Host 注册的是原始路径）。只有两侧都没有独立
+  // workspaceIdentity、key 就是路径时才允许按规范路径比较一次，避免把越权当成等价。
+  if (identity(left) || left.workspaceKey !== left.workspacePath) return false;
+  if (right.workspaceKey !== right.workspacePath) return false;
+  try {
+    return realpathSync(left.workspacePath) === realpathSync(right.workspacePath);
+  } catch {
+    return false;
+  }
 }
 
 export function createEnterpriseToolAuthorizationBridge(options: {

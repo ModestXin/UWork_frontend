@@ -1,5 +1,11 @@
 import { z } from "zod";
 
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+/** 生产必须是 HTTPS；只有回环地址允许明文（本机后台 / 合成登录的开发态）。 */
+const trustedHttpUrl = (url: URL): boolean =>
+  url.protocol === "https:" ||
+  (url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname));
+
 export const enterpriseIdentityProfileSchema = z.object({
   id: z.string().trim().min(1).max(256),
   tenantId: z.string().trim().min(1).max(256),
@@ -24,7 +30,7 @@ const enterpriseIdentityAttemptBaseSchema = z.object({
     .url()
     .refine((value) => {
       const url = new URL(value);
-      return url.protocol === "https:" && !url.username && !url.password;
+      return trustedHttpUrl(url) && !url.username && !url.password;
     }, "Authorization requires HTTPS without embedded credentials"),
   expiresAt: z.number().int().positive(),
   /** 存在时由 Desktop 的隔离扫码视图接收 HTTPS 回调，不依赖业务轮询。 */
@@ -33,7 +39,7 @@ const enterpriseIdentityAttemptBaseSchema = z.object({
     .url()
     .refine((value) => {
       const url = new URL(value);
-      return url.protocol === "https:" && !url.username && !url.password && !url.hash;
+      return trustedHttpUrl(url) && !url.username && !url.password && !url.hash;
     })
     .optional(),
   /** 兼容服务将 state 用作组织 ID；防伪 nonce 必须保留在 callbackUrl。 */

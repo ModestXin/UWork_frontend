@@ -105,6 +105,57 @@ test("the enterprise reverse RPC rejects forged workspace routing before calling
   assert.equal(calls, 0);
 });
 
+test("a symlinked workspace path is the same workspace, while a real mismatch still fails closed", async () => {
+  // macOS 的 /tmp 是指向 /private/tmp 的符号链接：子进程 realpath 后上报规范路径，
+  // Host 注册的是原始路径，二者必须是同一个工作区。
+  const { mkdtemp, symlink, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const directory = await mkdtemp(join(tmpdir(), "uwork-workspace-link-"));
+  const target = join(directory, "workspace");
+  const link = join(directory, "linked-workspace");
+  const { mkdir } = await import("node:fs/promises");
+  await mkdir(target, { recursive: true });
+  await symlink(target, link);
+  try {
+    const registered = { workspaceKey: target, workspacePath: target };
+    let calls = 0;
+    const bridge = createEnterpriseToolAuthorizationBridge({
+      isCurrent: () => true,
+      resolver: {
+        async authorize() {
+          calls++;
+          return { allowed: true, code: "allowed" };
+        },
+      },
+    });
+    const peer = client();
+    await bridge.handle(peer, registered, 1, {
+      ...request,
+      workspace: { workspaceKey: link, workspacePath: link },
+    });
+    assert.deepEqual(peer.results, [{ allowed: true, code: "allowed" }]);
+    assert.equal(calls, 1);
+    // 带独立 workspaceIdentity 的引用不参与规范路径比较：伪造身份仍然拒绝。
+    const forged = client();
+    await bridge.handle(forged, registered, 2, {
+      ...request,
+      workspace: { workspaceKey: "other", workspacePath: target, workspaceIdentity: "other" },
+    });
+    assert.deepEqual(forged.results, [{ allowed: false, code: "enterprise_workspace_mismatch" }]);
+    // 完全不同目录仍然不是同一个工作区。
+    const other = client();
+    await bridge.handle(other, registered, 3, {
+      ...request,
+      workspace: { workspaceKey: directory, workspacePath: directory },
+    });
+    assert.deepEqual(other.results, [{ allowed: false, code: "enterprise_workspace_mismatch" }]);
+    assert.equal(calls, 1);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("attachment owner proof uses the original bridge and rejects a different workspace before resolution", async () => {
   let calls = 0;
   const bridge = createEnterpriseToolAuthorizationBridge({

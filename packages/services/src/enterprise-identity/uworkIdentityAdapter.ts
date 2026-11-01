@@ -108,17 +108,29 @@ export function createUWorkIdentityAdapter(
         .parse(await send("/api/auth/wecom/attempts", "POST", signal, { tenantId: org.orgId }));
       const callbackUrl = new URL("/api/auth/wecom/callback", config.apiBaseUrl).href;
       const authorize = new URL(raw.authorizeUrl);
+      // 生产只接受企微官方授权域；本机回环控制面允许它自己托管授权页（开发态合成登录），
+      // state 与 redirect_uri 的绑定、以及后续换 code 的会话签发仍按原合同校验。
+      const controlPlane = new URL(config.apiBaseUrl);
+      const devLoopback =
+        controlPlane.protocol === "http:" &&
+        ["localhost", "127.0.0.1", "[::1]"].includes(controlPlane.hostname);
+      const trustedOrigin =
+        authorize.origin === "https://login.work.weixin.qq.com" ||
+        (devLoopback && authorize.origin === controlPlane.origin);
       if (
-        authorize.origin !== "https://login.work.weixin.qq.com" ||
+        !trustedOrigin ||
         authorize.searchParams.get("state") !== raw.id ||
         authorize.searchParams.get("redirect_uri") !== callbackUrl
       )
         throw new Error("Enterprise authorization binding mismatch");
       attempts.set(raw.id, { proof: raw.proof, orgId: org.orgId });
+      // 开发态合成授权由后台自己托管授权页并直接完成，没有可拦截的原生回调；
+      // 省略 callbackUrl 让界面走"外部浏览器 + 轮询"路径，而不是挂起扫码视图。
+      const syntheticAuthorize = devLoopback && authorize.origin === controlPlane.origin;
       return {
         id: raw.id,
         authorizationUrl: raw.authorizeUrl,
-        callbackUrl,
+        ...(syntheticAuthorize ? {} : { callbackUrl }),
         expiresAt: raw.expiresAt,
       };
     },
