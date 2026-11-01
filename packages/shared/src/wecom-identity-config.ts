@@ -1,12 +1,17 @@
 import { z } from "zod";
 
+/** 与 Host 运行时（uworkBackendSession）一致：只有回环地址允许明文，其余必须 HTTPS。 */
+const LOOPBACK_HOSTS = ["localhost", "127.0.0.1", "[::1]"];
+
 const httpsUrl = z
   .string()
   .max(2048)
   .url()
   .refine((value) => {
     const url = new URL(value);
-    return url.protocol === "https:" && !url.username && !url.password;
+    if (url.username || url.password) return false;
+    if (url.protocol === "https:") return true;
+    return url.protocol === "http:" && LOOPBACK_HOSTS.includes(url.hostname);
   });
 
 const MAX_ORGANIZATIONS = 16;

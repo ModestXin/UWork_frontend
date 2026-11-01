@@ -107,6 +107,22 @@ test("HTTP, embedded credentials and malformed callbacks are rejected", () => {
   }
 });
 
+test("loopback control planes are allowed in development, other plain HTTP hosts are not", () => {
+  // 本机后台开发（docker/localhost:PORT）走回环明文；与 Host 运行时规则一致。
+  const local = createWeComIdentityAdapter({
+    ...config,
+    apiBaseUrl: "http://localhost:3210",
+    callbackUrl: "http://127.0.0.1:3210/api/auth/wecom/callback",
+  });
+  assert.ok(local);
+  for (const patch of [
+    { apiBaseUrl: "http://localhost.evil.example" },
+    { apiBaseUrl: "http://10.0.0.5:3210" },
+    { callbackUrl: "http://192.168.1.10:3210/callback" },
+  ])
+    assert.throws(() => createWeComIdentityAdapter({ ...config, ...patch }));
+});
+
 test("per-organization callback domains drive redirect_uri for multi-company setups", async () => {
   // 企微按「该企业应用后台配置的授权回调域」校验 redirect_uri：各子公司域名不同，
   // 所以回调地址必须逐组织取，不能用一套域名混用（否则授权页直接报回调域名不一致）。
