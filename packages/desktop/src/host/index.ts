@@ -51,6 +51,7 @@ import {
   ISettingService,
   ISourceServerManagementService,
   IWindowControllerService,
+  IEnterpriseIdentityService,
   IConversationShareService,
   IPromptAttachmentTransferService,
   IZCodeAgentService,
@@ -86,6 +87,7 @@ import {
   type OffPeakRequestAuthBuilder,
 } from "@zcode/services/node";
 import { createHostResourceUsageResponder } from "./hostResourceUsage.js";
+import { createHostClientPresentationBridge } from "./clientPresentationBridge.js";
 import {
   assertBoundSessionDispatchable,
   resolveOffPeakDispatchKind,
@@ -243,6 +245,8 @@ type RemoteAssetDirs = import("./windowRemoteConnectionRegistry.js").WindowRemot
 
 const { parentPort } = process;
 const hostNetworkCapture = createHostNetworkCapture(parentPort);
+let clientPresentationBridge: ReturnType<typeof createHostClientPresentationBridge> | undefined;
+let clientPresentationSourceEpoch = 0;
 
 // 进程检索体验优化：host 由 utilityProcess 拉起时外壳仍是 Electron Helper，
 // 这里根据 main 传入的窗口 label 补一层稳定的 zcode-* title，方便系统进程列表过滤。
@@ -1871,7 +1875,8 @@ async function createWindowRemoteConnectionHandle(params: {
   confirmSourceServerInstall?: boolean;
 }): Promise<WindowRemoteConnectionHandle<ServiceCollection, HostRemoteConnectionCapabilities>> {
   if (!activeServices) throw new Error("Local Host services are not initialized.");
-  const clientConfigService = activeServices.get(IClientConfigService);
+  const sourceServices = activeServices;
+  const clientConfigService = sourceServices.get(IClientConfigService);
   if (params.signal.aborted) {
     throw new Error("远程连接已取消");
   }
@@ -2756,6 +2761,8 @@ function disposeAttachedServicePorts(): void {
 }
 
 async function disposeHostResources(reason: string): Promise<HostShutdownResult> {
+  clientPresentationBridge?.dispose();
+  clientPresentationBridge = undefined;
   databaseStartup?.dispose();
   pendingStartupAttachments.clear();
   if (hasDisposedHostResources) {
@@ -2853,6 +2860,8 @@ async function disposeHostResources(reason: string): Promise<HostShutdownResult>
 }
 
 function disposeHostResourcesBestEffort(reason: string): void {
+  clientPresentationBridge?.dispose();
+  clientPresentationBridge = undefined;
   if (hasDisposedHostResources) {
     return;
   }
@@ -2963,6 +2972,17 @@ parentPort.on("message", async (e: Electron.MessageEvent) => {
     return;
   }
   const port = e.ports[0];
+  if (msg.type === HostMessageTypes.ClientPresentationRead) {
+    if (clientPresentationBridge) void clientPresentationBridge.read(msg.requestId);
+    else
+      parentPort.postMessage({
+        type: HostResponseTypes.ClientPresentationResult,
+        requestId: msg.requestId,
+        sourceEpoch: clientPresentationSourceEpoch,
+        projection: { status: "unavailable" },
+      });
+    return;
+  }
   if (msg.type === HostMessageTypes.DatabaseStartupControl) {
     if (msg.control.action === "snapshot") databaseStartup?.coordinator.publish();
     else if (msg.control.action === "retry")
@@ -3976,6 +3996,16 @@ parentPort.on("message", async (e: Electron.MessageEvent) => {
                 process.platform === "win32" ? cuaOperationStateReporter : undefined,
             });
             activeServices = initializedServices;
+            clientPresentationBridge?.dispose();
+            clientPresentationBridge = createHostClientPresentationBridge({
+              identity: initializedServices.get(IEnterpriseIdentityService),
+              nextSourceEpoch: () => ++clientPresentationSourceEpoch,
+              publish: (message) => parentPort.postMessage(message),
+            });
+            parentPort.postMessage({
+              type: HostResponseTypes.ClientPresentationInvalidated,
+              sourceEpoch: clientPresentationSourceEpoch,
+            });
             activeHostApiNetworkTransport = hostApiNetworkTransport;
             return initializedServices;
           },

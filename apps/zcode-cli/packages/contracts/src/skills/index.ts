@@ -110,6 +110,7 @@ export interface SkillOperationOptions {
 }
 
 export interface SkillPort {
+  readonly enterpriseAssetGuarded?: boolean;
   discoverSkills(
     request: SkillDiscoverRequest,
     options?: SkillOperationOptions,

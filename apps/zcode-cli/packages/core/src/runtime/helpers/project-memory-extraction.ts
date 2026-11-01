@@ -15,6 +15,12 @@ import {
   type ProjectMemoryAgentContext,
 } from "./project-memory-agent.js";
 import { resolveEnabledProjectMemoryRoot } from "./project-memory.js";
+import {
+  authorizeProjectMemoryManifest,
+  createPromptAttachmentAuthorizationContext,
+  PromptAttachmentAuthorizationError,
+  waitForAttachment,
+} from "./attachment-authorization.js";
 
 const EXTRACTION_MAX_TURNS = 5;
 const EXTRACTION_DRAIN_TIMEOUT_MS = 60_000;
@@ -125,17 +131,13 @@ async function executeProjectMemoryExtraction(
 
   return telemetry.run(async () => {
     try {
-      const manifest = await scanMemoryManifest({
-        fileSystem: runtime.fileSystemPort!,
-        rootDir: input.snapshot.memoryRoot,
-        signal: input.abortSignal,
-      });
-      if (input.abortSignal.aborted) {
-        telemetry.finishCancelled("abort_signal");
-        return "aborted" as const;
-      }
+      const consumeManifest = await prepareProjectMemoryManifest(
+        runtime,
+        input.snapshot,
+        input.abortSignal,
+      );
       const prompt = buildMemoryExtractionPrompt({
-        manifest,
+        manifest: consumeManifest(),
         messageCount: input.messageCount,
       });
       const request = prepareProjectMemoryAgentRequest(input.snapshot, prompt);
@@ -166,6 +168,54 @@ async function executeProjectMemoryExtraction(
       return "error" as const;
     }
   });
+}
+
+async function prepareProjectMemoryManifest(
+  runtime: AgentRuntimeInternal,
+  snapshot: ProjectMemoryExtractionSnapshot,
+  signal: AbortSignal,
+) {
+  const fileSystem = runtime.fileSystemPort;
+  const assertCurrent = () => {
+    signal.throwIfAborted();
+    if (
+      runtime.shuttingDown ||
+      !fileSystem ||
+      runtime.fileSystemPort !== fileSystem ||
+      runtime.workspaceRoot !== snapshot.workspaceRoot ||
+      runtime.memoryRoot !== snapshot.memoryRoot ||
+      resolveEnabledProjectMemoryRoot(runtime.config, runtime.workspaceRoot) !== snapshot.memoryRoot
+    )
+      throw new PromptAttachmentAuthorizationError("enterprise_execution_context_changed");
+  };
+  assertCurrent();
+  const context = createPromptAttachmentAuthorizationContext(runtime, snapshot.traceContext);
+  // 原因：内部 topic scan 不经过 Read 工具。必须在读取前准入、发布前复核同 owner；
+  // 后继 Main 的合法 cd 不改变已调度 extraction 的原始执行 scope。
+  const admission = await authorizeProjectMemoryManifest(
+    {
+      traceContext: context.traceContext,
+      current: () => ({
+        ...context.current(),
+        workspacePath: snapshot.workspaceRoot,
+        workingDirectory: snapshot.workingDirectory,
+      }),
+    },
+    signal,
+  );
+  assertCurrent();
+  const manifest = await waitForAttachment(
+    scanMemoryManifest({ fileSystem: fileSystem!, rootDir: snapshot.memoryRoot, signal }),
+    signal,
+  );
+  assertCurrent();
+  await admission.revalidate();
+  // 返回同步消费者：async 返回本身也有微任务边界，不能提前视为已发布。
+  return () => {
+    assertCurrent();
+    admission.assertCurrent();
+    return manifest;
+  };
 }
 
 function isAbortError(error: unknown): boolean {

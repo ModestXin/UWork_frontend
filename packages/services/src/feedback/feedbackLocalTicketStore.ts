@@ -35,13 +35,18 @@ export class FeedbackLocalTicketStore {
       .map(({ deviceMid: _deviceMid, ...ticket }) => ticket);
   }
 
-  async upsert(deviceMid: string, ticket: FeedbackTicketSummary): Promise<void> {
+  async upsert(
+    deviceMid: string,
+    ticket: FeedbackTicketSummary,
+    beforeCommit?: () => void,
+  ): Promise<void> {
     const file = await this.read();
+    beforeCommit?.();
     const next: StoredFeedbackTicket = { ...ticket, deviceMid };
     const rest = file.tickets.filter(
       (current) => current.deviceMid !== deviceMid || current.id !== ticket.id,
     );
-    await this.write({ tickets: [next, ...rest].slice(0, 200) });
+    await this.write({ tickets: [next, ...rest].slice(0, 200) }, beforeCommit);
   }
 
   private async read(): Promise<FeedbackTicketStoreFile> {
@@ -62,8 +67,10 @@ export class FeedbackLocalTicketStore {
     }
   }
 
-  private async write(file: FeedbackTicketStoreFile): Promise<void> {
+  private async write(file: FeedbackTicketStoreFile, beforeCommit?: () => void): Promise<void> {
     await mkdir(dirname(this.filePath), { recursive: true });
+    // read/mkdir 都可能跨越 owner 撤销；真正派发本地写入前再核对同一操作收据。
+    beforeCommit?.();
     await writeFile(this.filePath, `${JSON.stringify(file, null, 2)}\n`, "utf8");
   }
 }

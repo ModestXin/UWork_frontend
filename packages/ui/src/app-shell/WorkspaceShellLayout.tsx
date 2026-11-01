@@ -21,6 +21,7 @@ import {
   type SidePaneFullViewFloating,
   type SidePaneFullViewHostMode,
 } from "@/side-pane-full-view/index.js";
+import { dispatchAuthorizedEnterpriseMenu } from "@/lib/enterpriseMenuNavigation.js";
 import {
   SavedWorkflowHubProvider,
   type SavedWorkflowHubTarget,
@@ -1901,8 +1902,7 @@ const WorkspaceShellLayoutContent = memo(function WorkspaceShellLayoutComponent(
   // 修复原因：Draft 之前维护一套独立轻量 header，导致 side pane、caption 安全区和拖拽入口
   // 与 Task Header 分叉。桌面端统一复用 WorkspaceHeader，只由 variant 裁剪 task 专属内容；
   // 手机远控无 active task 时仍不渲染桌面 chrome，继续遵守 replayable overlay 边界。
-  const shouldRenderMainViewHeader =
-    workspaceMainView !== "automations" && workspaceMainView !== "plugin-store";
+  const shouldRenderMainViewHeader = workspaceMainView === "chat";
   const shouldRenderWorkspaceHeader =
     shouldRenderMainViewHeader && (activeTaskId !== null || isDesktop);
   // 修复原因：ErrorBoundary resetKeys 的数组如果每次 render 都重新创建，
@@ -1981,6 +1981,15 @@ const WorkspaceShellLayoutContent = memo(function WorkspaceShellLayoutComponent(
       automationsActive={workspaceMainView === "automations"}
       onOpenPluginStore={handleOpenPluginStore}
       pluginStoreActive={workspaceMainView === "plugin-store"}
+      // 企业菜单已在 Host 侧做过准入，这里只把 legacy wire ID 分派给 UWork 现有所有者。
+      onEnterpriseNavigate={(menu) =>
+        dispatchAuthorizedEnterpriseMenu(menu, {
+          openChat: () => onWorkspaceMainViewChange("chat"),
+          openAutomations: handleOpenAutomations,
+          openPluginStore: handleOpenPluginStore,
+          openBrowserUrl: handleOpenBrowserUrl,
+        })
+      }
       // 桌面没有 mobile 导航动作；内联包装曾让右侧开关穿透侧栏 memo，重复渲染全部项目。
       onWebRemoteTaskOpen={
         mobile

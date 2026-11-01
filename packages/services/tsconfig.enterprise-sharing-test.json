@@ -1,0 +1,22 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "strict": true,
+    "composite": false,
+    "incremental": false,
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "disableSourceOfProjectReferenceRedirect": true
+  },
+  "include": [
+    "test/uworkConversationSharing.test.ts",
+    "test/uworkManagedConversationSharing.test.ts",
+    "test/uworkShareManagedAdmission.test.ts",
+    "test/uworkShareRequestBounds.test.ts",
+    "test/uworkShareLocalFiles.test.ts",
+    "src/conversation-share/**/*.ts"
+  ],
+  "references": [{ "path": "../shared" }, { "path": "../rpc" }]
+}

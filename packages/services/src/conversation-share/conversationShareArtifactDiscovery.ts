@@ -1,6 +1,7 @@
 /* oxlint-disable eslint(max-lines) -- input attachment staging and preview artifact discovery share one immutable snapshot boundary. */
 import { createHash } from "node:crypto";
 import { isWorkflowShareFallbackRow } from "#src/conversation-share/conversationShareWorkflowSnapshot.js";
+import { ConversationShareClientError } from "./conversationShareHttpClient.js";
 
 import {
   buildConversationPreviewArtifactCandidates,
@@ -148,6 +149,7 @@ async function materializeRegisteredArtifacts(options: {
 }
 
 async function discoverPreviewArtifacts(options: {
+  skipFileReads?: boolean;
   zcodeAgentService: Pick<
     IZCodeAgentService,
     "conversationFileChangesV4" | "conversationAttachmentReadV4"
@@ -208,6 +210,18 @@ async function discoverPreviewArtifacts(options: {
       assistantText,
       options.input.workspacePath,
     );
+    // 组织文件许可关闭时，仅报告未选入的引用，不能为存在性检查先读磁盘。
+    if (options.skipFileReads) {
+      if (references.length > 0)
+        options.warnings.push({
+          code: "artifact_type_not_allowed",
+          scope: "artifact",
+          productTurnId,
+          turnOrdinal: turnOrdinalByProductTurnId.get(productTurnId),
+          allowedArtifacts: [],
+        });
+      continue;
+    }
     const needsFileChanges = references.some(
       (reference) => reference.kind === "markdown" || reference.kind === "html",
     );
@@ -232,6 +246,11 @@ async function discoverPreviewArtifacts(options: {
           baseLogEpoch: options.logEpoch,
         });
       } catch (error) {
+        if (
+          error instanceof ConversationShareClientError &&
+          (error.kind === "feature_disabled" || error.kind === "authentication_required")
+        )
+          throw error;
         // rows/range 与 fileChanges 是两次只读 RPC；若中间 projection 已推进，继续发布会
         // 把不同 revision 的对话和文件拼在一起。陈旧水位必须在 prepare 前显式失败。
         const message = error instanceof Error ? error.message : String(error);
@@ -292,6 +311,11 @@ async function discoverPreviewArtifacts(options: {
           fallbackReadCache.set(candidate.sourceRef, materialized);
         }
       } catch (error) {
+        if (
+          error instanceof ConversationShareClientError &&
+          (error.kind === "feature_disabled" || error.kind === "authentication_required")
+        )
+          throw error;
         if (
           error instanceof ConversationShareServiceError &&
           error.reasonCode === "artifact_read_failed"
@@ -357,6 +381,11 @@ async function discoverPreviewArtifacts(options: {
           });
         }
       } catch (error) {
+        if (
+          error instanceof ConversationShareClientError &&
+          (error.kind === "feature_disabled" || error.kind === "authentication_required")
+        )
+          throw error;
         if (
           !(error instanceof ConversationShareServiceError) ||
           error.reasonCode !== "artifact_read_failed"
@@ -572,6 +601,11 @@ async function discoverInputAttachments(options: {
           bytes: materialized.bytes.byteLength,
         });
       } catch (error) {
+        if (
+          error instanceof ConversationShareClientError &&
+          (error.kind === "feature_disabled" || error.kind === "authentication_required")
+        )
+          throw error;
         const faultCode = readZCodeAttachmentFaultCode(error);
         if (
           faultCode === ZCODE_ATTACHMENT_FAULT_CODES.shareReadNotAuthorized ||
@@ -665,6 +699,7 @@ function insertDiscoveredArtifacts(
 }
 
 export async function buildConversationShareArtifactSnapshot(options: {
+  skipFileReads?: boolean;
   zcodeAgentService: Pick<
     IZCodeAgentService,
     "conversationFileChangesV4" | "conversationAttachmentReadV4"

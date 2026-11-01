@@ -64,6 +64,10 @@ import type { WorkspaceHookRuntimeAdmissionPort } from "../hooks/workspace-hook-
 
 export interface AgentRuntimeInternal
   extends AgentRuntimeCoreMethods, AgentRuntimeTurnMethods, AgentRuntimeHookMethods {
+  createWorkflowAdmission(input?: {
+    traceContext?: TraceContext;
+    signal?: AbortSignal;
+  }): Promise<import("@zcode/contracts").WorkflowExecutionAdmission>;
   sessionId: SessionId;
   turnNumber: number;
   config: AgentRuntimeConfig;
@@ -85,6 +89,7 @@ export interface AgentRuntimeInternal
   modelFactory: AgentRuntimeDeps["modelFactory"];
   modelIoDir?: string;
   providerRuntimeHeadersPort?: ProviderRuntimeHeadersPort;
+  turnPresentationPort?: AgentRuntimeDeps["turnPresentationPort"];
   browserControlPort?: AgentRuntimeDeps["browserControlPort"];
   modelRequestAdmission?: AgentRuntimeDeps["modelRequestAdmission"];
   sessionModelSelection: ModelSelection | undefined;

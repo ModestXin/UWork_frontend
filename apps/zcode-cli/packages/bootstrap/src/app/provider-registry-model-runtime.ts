@@ -9,6 +9,10 @@ import {
   type ProviderRegistryView,
 } from "@zcode/provider";
 import { createRegistrySelectionProtocolError } from "./provider-registry-selection.js";
+import {
+  withModelResultAuthorization,
+  type ModelDispatchGuard,
+} from "./enterprise-runtime-assets.js";
 
 export type RuntimeModelFactory = NonNullable<AgentRuntimeDeps["modelFactory"]>;
 
@@ -25,6 +29,7 @@ type ApiProviderModelAdapter = Pick<AiSdkModelAdapter, "createModel">;
 interface ApiProviderModelRuntimeOptions {
   readonly registry: ProviderRegistryModelSource;
   readonly modelAdapter: ApiProviderModelAdapter;
+  readonly authorization?: ModelDispatchGuard;
 }
 
 /**
@@ -33,11 +38,13 @@ interface ApiProviderModelRuntimeOptions {
 export class ApiProviderModelRuntime {
   readonly #registry: ProviderRegistryModelSource;
   readonly #modelAdapter: ApiProviderModelAdapter;
+  readonly #authorization?: ModelDispatchGuard;
   #started = false;
 
   constructor(options: ApiProviderModelRuntimeOptions) {
     this.#registry = options.registry;
     this.#modelAdapter = options.modelAdapter;
+    this.#authorization = options.authorization;
   }
 
   readonly modelFactory: RuntimeModelFactory = (target): Model => {
@@ -71,7 +78,7 @@ export class ApiProviderModelRuntime {
     // 输出预算属于单次请求，由 Agent 执行链显式决定，不能在 ModelFactory 中静默绑定。
     // Selection 已在上面的 Registry 边界完成校验，Factory 不再承担任何缺省修复。
     const normalReasoningLevel = target.selection.options!.reasoningLevel!;
-    return this.#modelAdapter.createModel({
+    const model = this.#modelAdapter.createModel({
       providerId: provider.providerId,
       modelId: registryModel.modelId,
       providerConfig: provider.config,
@@ -95,5 +102,6 @@ export class ApiProviderModelRuntime {
         reasoningLevel: normalReasoningLevel,
       },
     });
+    return withModelResultAuthorization(model, provider.config.api.baseUrl, this.#authorization);
   }
 }

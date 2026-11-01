@@ -15,6 +15,8 @@ import type {
   DynamicWorkflowRunSubmitRequest,
   DynamicWorkflowRunSubmitResult,
   TraceContext,
+  DynamicWorkflowRunSubmitOptions,
+  WorkflowExecutionAdmission,
 } from "@zcode/contracts";
 import {
   collectDiagnostics,
@@ -54,6 +56,10 @@ import type { DynamicWorkflowRunServiceDeps } from "./dynamic-workflow-run-servi
 import { workflowSubagentPermissionModeField } from "./workflow-actor-permission.js";
 import type { WorkflowEscalationRegistry } from "./workflow-escalation-registry.js";
 import { createWorkflowRunControl } from "./workflow-run-control.js";
+import {
+  acquireWorkflowEntryAdmission,
+  revalidateWorkflowEntry,
+} from "./workflow-entry-admission.js";
 
 /**
  * 两条入口要用的 service 内部状态。全是**引用**而不是副本：注册表与停驻表是 service 的那一份，
@@ -61,6 +67,8 @@ import { createWorkflowRunControl } from "./workflow-run-control.js";
  * 路径上按当下并发探测算出的上界（resume 沿用 journal 记录里的 caps，不经它）。
  */
 export interface DynamicWorkflowRunEntryContext {
+  assertOpen(): void;
+  lifetimeSignal: AbortSignal;
   deps: DynamicWorkflowRunServiceDeps;
   runs: Map<string, RunRegistryEntry>;
   escalations: WorkflowEscalationRegistry;
@@ -80,8 +88,11 @@ export interface DynamicWorkflowRunEntryContext {
 export async function submitDynamicWorkflowRun(
   ctx: DynamicWorkflowRunEntryContext,
   request: DynamicWorkflowRunSubmitRequest,
+  options?: DynamicWorkflowRunSubmitOptions,
 ): Promise<DynamicWorkflowRunSubmitResult> {
+  const admission = await acquireWorkflowEntryAdmission(ctx, options);
   const runId = startNewRun(ctx, {
+    admission,
     runId: mintRunId(),
     scriptText: request.scriptText,
     cwd: request.cwd,
@@ -122,8 +133,10 @@ export async function submitDynamicWorkflowRun(
 export async function amendDynamicWorkflowRun(
   ctx: DynamicWorkflowRunEntryContext,
   request: DynamicWorkflowRunAmendRequest,
+  options?: DynamicWorkflowRunSubmitOptions,
 ): Promise<DynamicWorkflowRunAmendResult> {
   const { deps, runs } = ctx;
+  const admission = await acquireWorkflowEntryAdmission(ctx, options);
   const preflight = preflightAmendImport(deps.journal, request.predecessorRunId);
   if (!preflight.ok) {
     deps.logger?.info?.("Dynamic workflow amend refused", {
@@ -146,6 +159,7 @@ export async function amendDynamicWorkflowRun(
     live.controller.abort({ superseded: runId });
     // 等前驱自己的结算 promise（与 waitForTask 同一个 promise；trackSettlement 保证它永不 reject）。
     await live.settlement;
+    await revalidateWorkflowEntry(ctx, admission, options?.signal);
     supersededRunId = request.predecessorRunId;
     deps.logger?.info?.("Dynamic workflow run superseded by an amendment", {
       event: "dynamic_workflow.amend.superseded",
@@ -179,10 +193,17 @@ export async function amendDynamicWorkflowRun(
     deps.actorTranscriptStore === undefined ? undefined : await live?.quiescence?.quietSessions();
 
   const built = await buildImportedCache(
-    deps,
+    {
+      ...deps,
+      admission,
+      executionSignal: options?.signal
+        ? AbortSignal.any([ctx.lifetimeSignal, options.signal])
+        : ctx.lifetimeSignal,
+    },
     request.predecessorRunId,
     quietSessions === undefined ? undefined : { quietSessions },
   );
+  await revalidateWorkflowEntry(ctx, admission, options?.signal);
   if (!built.ok) {
     // 预检刚通过：run 存在、边界齐全；到这里还被拒只剩「前驱非终态」——注册表说它不在飞而
     // journal 说它还在跑（别的进程持有）。这不是模型能改的输入，按接线故障上抛。
@@ -203,6 +224,7 @@ export async function amendDynamicWorkflowRun(
       : undefined;
 
   startNewRun(ctx, {
+    admission,
     runId,
     scriptText: request.scriptText,
     cwd: request.cwd,
@@ -239,6 +261,7 @@ export async function amendDynamicWorkflowRun(
 }
 
 interface StartNewRunInput {
+  admission?: WorkflowExecutionAdmission;
   runId: string;
   scriptText: string;
   cwd: string;
@@ -279,6 +302,7 @@ interface StartNewRunInput {
  * 返回 runId（同步：注册表条目在本函数返回前就已存在，见下面的注释）。
  */
 function startNewRun(ctx: DynamicWorkflowRunEntryContext, input: StartNewRunInput): string {
+  ctx.assertOpen();
   const { deps, runs, escalations } = ctx;
   const { imported, runId } = input;
   const compiled = compileOnce(input.scriptText);
@@ -371,6 +395,7 @@ function startNewRun(ctx: DynamicWorkflowRunEntryContext, input: StartNewRunInpu
     // 真正的结算 promise 在下面替换；先占位以满足类型（同步可见）。
     settlement: Promise.resolve<RunSettlement>({ status: "stopped", reason: "user" }),
   };
+  ctx.assertOpen();
   runs.set(runId, entry);
 
   // fire-and-forget：绝不在 submit 里 await 结算。submit 的契约是「启动并交出 runId」。
@@ -378,6 +403,7 @@ function startNewRun(ctx: DynamicWorkflowRunEntryContext, input: StartNewRunInpu
     runId,
     entry,
     launchDynamicWorkflowRun({
+      admission: input.admission,
       caps,
       compiled,
       cwd: input.cwd,
@@ -424,8 +450,10 @@ function startNewRun(ctx: DynamicWorkflowRunEntryContext, input: StartNewRunInpu
 export async function resumeDynamicWorkflowRun(
   ctx: DynamicWorkflowRunEntryContext,
   runId: string,
+  options?: DynamicWorkflowRunSubmitOptions,
 ): Promise<DynamicWorkflowRunResumeResult> {
   const { deps, runs, escalations } = ctx;
+  const admission = await acquireWorkflowEntryAdmission(ctx, options);
   const record = deps.journal.getRun(runId);
   if (record === undefined) return { ok: false, reason: "not_found" };
   // in-process 在飞的同 runId：journal 状态是 running，本就不可恢复；单列 reason 是
@@ -488,10 +516,20 @@ export async function resumeDynamicWorkflowRun(
   const rebuilt =
     record.resumedFrom === undefined
       ? undefined
-      : await rebuildImportedCacheForResume(deps, {
-          predecessorRunId: record.resumedFrom,
-          runId,
-        });
+      : await rebuildImportedCacheForResume(
+          {
+            ...deps,
+            admission,
+            executionSignal: options?.signal
+              ? AbortSignal.any([ctx.lifetimeSignal, options.signal])
+              : ctx.lifetimeSignal,
+          },
+          {
+            predecessorRunId: record.resumedFrom,
+            runId,
+          },
+        );
+  await revalidateWorkflowEntry(ctx, admission, options?.signal);
 
   // 替换注册表条目：同 runId、新 AbortController、新结算 promise——cancel 从此恢复可用。
   // 必须先于 launch（文件头不变式 5：条目是 watcher 的前提）。
@@ -533,6 +571,7 @@ export async function resumeDynamicWorkflowRun(
     ...(resumedPhaseNames === undefined ? {} : { phaseNames: resumedPhaseNames }),
     settlement: Promise.resolve<RunSettlement>({ status: "stopped", reason: "user" }),
   };
+  ctx.assertOpen();
   runs.set(runId, entry);
 
   entry.settlement = ctx.trackSettlement(
@@ -540,6 +579,7 @@ export async function resumeDynamicWorkflowRun(
     entry,
     launchDynamicWorkflowRun({
       holeTypeOf: (siteId) => entry.holes?.find((hole) => hole.siteId === siteId)?.type,
+      admission,
       // caps 沿用 journal 记录：spentTokens 是对着这套 caps 累计的，
       // 重算等于悄悄挪门柱。
       caps: record.caps,

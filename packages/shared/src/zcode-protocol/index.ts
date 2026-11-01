@@ -36,6 +36,12 @@ import { accountProviderUnavailableReasonSchema } from "../account-provider-stat
 import { bashOutputDisplaySchema } from "../bash-output-display.js";
 import { zcodeAutomationBotDeliveryTargetSchema } from "../bots.js";
 import { executionOutputPreviewSchema } from "../execution-output-preview.js";
+import {
+  enterpriseAdmissionAssetSchema,
+  enterpriseAssetReferenceSchema,
+  enterpriseConnectorReferenceSchema,
+} from "../enterprise-assets.js";
+export * from "./enterprise-model-relay.js";
 import { completeModelPropertiesDataSchema } from "../model-config.js";
 import { modelExecutionSchema } from "../model-execution.js";
 export type { ModelExecutionSelectionFallback } from "../model-execution.js";
@@ -456,6 +462,7 @@ export type ZCodeProtocolMessage = z.infer<typeof zcodeProtocolMessageSchema>;
 export const zcodeProtocolNotifications = {
   storageStartup: "startup/storageState",
   providerRuntimeHeadersCancelled: "interaction/providerRuntimeHeadersCancelled",
+  enterpriseToolAuthorizationCancelled: "interaction/enterpriseToolAuthorizationCancelled",
   mcpTelemetry: "process/mcpTelemetry",
   mcpResourceSamples: "process/mcpResourceSamples",
   toolExecResource: "process/toolExecResource",
@@ -2046,6 +2053,7 @@ export const zcodeSessionEventsParamsSchema = z
 export type ZCodeSessionEventsParams = z.infer<typeof zcodeSessionEventsParamsSchema>;
 
 export const zcodeSessionRuntimePreferencesScopeSchema = z.enum([
+  "turn-presentation",
   "runtime-materialization",
   "user-execution",
 ]);
@@ -2083,6 +2091,8 @@ export type ZCodeModelContextBudgetStrategy = z.infer<typeof zcodeModelContextBu
 export const zcodeSessionRuntimePreferencesResultSchema = z
   .object({
     additionalDirectories: z.array(nonEmptyString).max(256).optional(),
+    presentationSurface: z.enum(["terminal", "zcode_desktop"]).optional(),
+    presentationStatus: z.enum(["ready", "unsupported", "unavailable", "unmanaged"]).optional(),
     nativeSearchEnhancementsEnabled: z.boolean(),
     toolSearchMode: appToolSearchModeSchema.default("off"),
     subagentRuntimeConfigEnabled: z.boolean().optional(),
@@ -2851,6 +2861,227 @@ export type ZCodeProviderRuntimeHeadersResponse = z.infer<
 // Agent 进程不是用户身份权威：它把 (pluginId, mcpKey, targetOrigin) 报给 host，由 host
 // 解析当前 Coding Plan 凭证并回传本次请求的身份头。请求侧不含任何秘密。
 // 与 interaction/requestProviderRuntimeHeaders 同类：Agent 发起、host 自动响应、零 UI。
+const enterpriseInteractionScopeSchema = z
+  .object({
+    requestId: z.string().min(1).max(200),
+    sessionId: z.string().min(1).max(200),
+    workspace: zcodeWorkspaceRefSchema,
+  })
+  .strict();
+// 附件正文绕过工具分派，沿原私有授权桥用固定消费者验证，元数据不能携带正文。
+const promptAttachmentReadInputSchema = z
+  .object({
+    path: z
+      .string()
+      .min(1)
+      .max(4096)
+      .refine(
+        (path) =>
+          !path.includes("\0") &&
+          (path.startsWith("/") || /^[a-zA-Z]:[\\/]/u.test(path) || path.startsWith("\\\\")),
+      ),
+    kind: z.enum(["file", "image", "video", "pdf"]),
+  })
+  .strict();
+// Memory index 由原 context 内部读取；只传固定类别，不能借授权桥外发路径或正文。
+const projectMemoryIndexReadInputSchema = z
+  .object({ kind: z.literal("project-memory-index") })
+  .strict();
+// Manifest 扫描会发布 topic description；同样只传固定类别，防止元数据绕过正文准入。
+const projectMemoryManifestReadInputSchema = z
+  .object({ kind: z.literal("project-memory-manifest") })
+  .strict();
+export const zcodeEnterpriseToolAuthorizationParamsSchema = enterpriseInteractionScopeSchema
+  .extend({
+    toolCallId: z.string().min(1).max(200),
+    toolName: z.string().min(1).max(200),
+    workingDirectory: z.string().min(1).max(4096),
+    phase: z.enum([
+      "before_hooks",
+      "before_dispatch",
+      "before_result",
+      "native_execution",
+      "network_request",
+      "asset_load",
+    ]),
+    asset: enterpriseAdmissionAssetSchema.optional(),
+    ownerKey: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
+    capability: z
+      .object({
+        permission: z.string().max(200),
+        sideEffectScope: z.enum([
+          "none",
+          "workspace",
+          "git",
+          "network",
+          "system",
+          "session",
+          "userInteraction",
+        ]),
+        readOnly: z.boolean(),
+        destructive: z.boolean(),
+        networkGuarded: z.boolean().optional(),
+        assetGuarded: z.boolean().optional(),
+      })
+      .strict(),
+    input: z.unknown().refine((value) => {
+      try {
+        const encoded = JSON.stringify(value);
+        if (encoded === undefined || new TextEncoder().encode(encoded).length > 262144)
+          return false;
+        const pending = [{ value, depth: 0 }];
+        let nodes = 0;
+        while (pending.length) {
+          const item = pending.pop()!;
+          if (++nodes > 10000 || item.depth > 20) return false;
+          if (item.value && typeof item.value === "object")
+            for (const child of Object.values(item.value))
+              pending.push({ value: child, depth: item.depth + 1 });
+        }
+        return true;
+      } catch {
+        return false;
+      }
+    }, "Enterprise tool input exceeds the bounded JSON contract"),
+  })
+  .strict()
+  .refine((request) => {
+    const attachmentRead = request.toolName === "PromptAttachmentRead";
+    const memoryIndexRead = request.toolName === "ProjectMemoryIndexRead";
+    const memoryManifestRead = request.toolName === "ProjectMemoryManifestRead";
+    if (
+      (attachmentRead || memoryIndexRead || memoryManifestRead) &&
+      (!(
+        attachmentRead
+          ? promptAttachmentReadInputSchema
+          : memoryIndexRead
+            ? projectMemoryIndexReadInputSchema
+            : projectMemoryManifestReadInputSchema
+      ).safeParse(request.input).success ||
+        Object.keys(request.capability).length !== 4 ||
+        request.capability.permission !== "filesystem" ||
+        !request.capability.readOnly ||
+        request.capability.destructive ||
+        request.capability.sideEffectScope !== "none" ||
+        !["before_dispatch", "before_result"].includes(request.phase))
+    )
+      return false;
+    if (request.phase === "asset_load") return request.ownerKey !== undefined;
+    if (request.phase === "before_result")
+      return (
+        request.asset === undefined &&
+        (attachmentRead ||
+          memoryIndexRead ||
+          memoryManifestRead ||
+          (request.toolName === "Read" &&
+            request.capability.permission === "read" &&
+            request.capability.readOnly &&
+            !request.capability.destructive &&
+            request.capability.sideEffectScope === "none"))
+      );
+    return request.asset === undefined && request.ownerKey === undefined;
+  });
+export type ZCodeEnterpriseToolAuthorizationParams = z.infer<
+  typeof zcodeEnterpriseToolAuthorizationParamsSchema
+>;
+export const zcodeEnterpriseToolAuthorizationCancelledSchema = enterpriseInteractionScopeSchema;
+export const zcodeEnterpriseToolAuthorizationResultSchema = z
+  .object({
+    allowed: z.boolean(),
+    ownerKey: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
+    code: z
+      .string()
+      .regex(/^(allowed|not_managed|enterprise_[a-z_]+)$/)
+      .max(80),
+  })
+  .strict()
+  .refine((value) =>
+    value.allowed
+      ? ["allowed", "not_managed"].includes(value.code)
+      : value.code.startsWith("enterprise_"),
+  );
+export type ZCodeEnterpriseToolAuthorizationResult = z.infer<
+  typeof zcodeEnterpriseToolAuthorizationResultSchema
+>;
+export const zcodeEnterpriseSkillsCatalogParamsSchema =
+  zcodeEnterpriseToolAuthorizationCancelledSchema;
+export type ZCodeEnterpriseSkillsCatalogParams = z.infer<
+  typeof zcodeEnterpriseSkillsCatalogParamsSchema
+>;
+
+/** 有界 JSON 契约：连接器帧与工具参数共用同一组上界，避免反向 RPC 成为无界通道。 */
+function boundedEnterpriseJson(message: string) {
+  return z.unknown().refine((value) => {
+    try {
+      const encoded = JSON.stringify(value);
+      if (encoded === undefined || new TextEncoder().encode(encoded).length > 262144) return false;
+      const pending = [{ value, depth: 0 }];
+      let nodes = 0;
+      while (pending.length) {
+        const item = pending.pop()!;
+        if (++nodes > 10000 || item.depth > 20) return false;
+        if (item.value && typeof item.value === "object")
+          for (const child of Object.values(item.value))
+            pending.push({ value: child, depth: item.depth + 1 });
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }, message);
+}
+/** 后端签发的连接器会话标识：可打印 ASCII、不含分隔空白。 */
+const enterpriseConnectorSessionIdSchema = z.string().regex(/^[\x21-\x7e]{1,200}$/);
+const enterpriseDeniedCodeSchema = z
+  .string()
+  .regex(/^enterprise_[a-z_]{1,64}$/)
+  .max(80);
+export const zcodeEnterpriseConnectorParamsSchema = enterpriseInteractionScopeSchema
+  .extend({
+    connector: enterpriseConnectorReferenceSchema,
+    ownerKey: z.string().regex(/^[a-f0-9]{64}$/),
+    /** 单条 MCP 帧，或该连接器会话的显式回收；同一通道、同一逐次准入。 */
+    request: z.discriminatedUnion("kind", [
+      z
+        .object({
+          kind: z.literal("rpc"),
+          frame: boundedEnterpriseJson(
+            "Enterprise connector frame exceeds the bounded JSON contract",
+          ),
+          mcpSessionId: enterpriseConnectorSessionIdSchema.optional(),
+        })
+        .strict(),
+      z
+        .object({
+          kind: z.literal("release"),
+          mcpSessionId: enterpriseConnectorSessionIdSchema,
+        })
+        .strict(),
+    ]),
+  })
+  .strict();
+export type ZCodeEnterpriseConnectorParams = z.infer<typeof zcodeEnterpriseConnectorParamsSchema>;
+export const zcodeEnterpriseConnectorResultSchema = z.discriminatedUnion("status", [
+  z
+    .object({
+      status: z.literal("ok"),
+      /** 通知类帧没有响应体；有响应时必须是后端已校验 ID 的 JSON-RPC 帧。 */
+      frame: boundedEnterpriseJson(
+        "Enterprise connector result exceeds the bounded JSON contract",
+      ).optional(),
+      mcpSessionId: enterpriseConnectorSessionIdSchema.optional(),
+    })
+    .strict(),
+  z.object({ status: z.literal("denied"), code: enterpriseDeniedCodeSchema }).strict(),
+]);
+export type ZCodeEnterpriseConnectorResult = z.infer<typeof zcodeEnterpriseConnectorResultSchema>;
+
 export const zcodeOfficialMcpAuthHeadersRequestParamsSchema = z
   .object({
     requestId: nonEmptyString,
@@ -4236,6 +4467,10 @@ export const zcodeProtocolMethods = {
   interactionRequestUserInput: "interaction/requestUserInput",
   interactionRequestProviderRuntimeHeaders: "interaction/requestProviderRuntimeHeaders",
   interactionRequestOfficialMcpAuthHeaders: "interaction/requestOfficialMcpAuthHeaders",
+  interactionAuthorizeEnterpriseTool: "interaction/authorizeEnterpriseTool",
+  interactionReadEnterpriseSkills: "interaction/readEnterpriseSkills",
+  interactionRequestEnterpriseConnector: "interaction/requestEnterpriseConnector",
+  interactionEnterpriseModelRequest: "interaction/enterpriseModelRequest",
   // browser-use 反向请求由 agent 发起，host 转给 main 中的 CDP executor。
   interactionBrowserList: "interaction/browserList",
   interactionBrowserExecute: "interaction/browserExecute",

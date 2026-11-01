@@ -1,3 +1,4 @@
+import type { ProviderSettingsPolicy } from "./uworkProviderSettingsPolicy.js";
 import {
   NodeModelSelectionConfigRepository,
   createNodeModelSelectionFacade,
@@ -25,27 +26,33 @@ import {
   createModelSelectionService,
   createProviderSettingsService,
   type IModelSelectionService,
-  type IProviderSettingsService,
+  type HostProviderSettingsService,
   type ModelSelectionConfiguredDefaultSource,
   type ProviderSettingsConnectivityTester,
   type ProviderModelDiscoverer,
 } from "./providerFacadeServices.js";
 import { createServiceLogger } from "#src/logger/serviceLogger.js";
+import { createGatewayModelSelectionSource } from "./gatewayModelSelectionSource.js";
+import type { GatewayCatalogAuthority } from "../ucas-gateway/gatewayCatalogLifecycle.js";
 
 const log = createServiceLogger("provider-runtime");
 
 export interface ProviderRuntimeOptions extends ProviderConfigRuntimeOptions {
+  readonly modelSelectionCatalogAuthority?: GatewayCatalogAuthority;
   readonly accountSource?: RefreshableProviderSource<AccountProviderConfigSnapshot>;
   readonly testConnectivity?: ProviderSettingsConnectivityTester;
   readonly discoverModels?: ProviderModelDiscoverer;
+  readonly settingsPolicy?: ProviderSettingsPolicy;
 }
 
 export interface ProviderRuntimeDependencies {
+  readonly modelSelectionCatalogAuthority?: GatewayCatalogAuthority;
   readonly configRuntime: ProviderConfigRuntime;
   readonly accountSource?: RefreshableProviderSource<AccountProviderConfigSnapshot>;
   readonly disposeAccountSource?: () => void;
   readonly testConnectivity?: ProviderSettingsConnectivityTester;
   readonly discoverModels?: ProviderModelDiscoverer;
+  readonly settingsPolicy?: ProviderSettingsPolicy;
   readonly modelSelectionConfiguredDefaultSource?: ModelSelectionConfiguredDefaultSource;
   readonly disposeModelSelectionConfiguredDefaultSource?: () => void;
 }
@@ -74,12 +81,13 @@ export class EmptyAccountProviderConfigSource implements ProviderSource<AccountP
 export class ProviderRuntime {
   readonly configService: ProviderConfigRuntime["configService"];
   readonly registryService: ProviderRegistryService;
-  readonly providerSettings: IProviderSettingsService;
+  readonly providerSettings: HostProviderSettingsService;
   readonly modelSelection: IModelSelectionService;
   readonly #configRuntime: ProviderConfigRuntime;
   readonly #disposeAccountSource?: () => void;
   readonly #disposeBuiltinRecovery: () => void;
   readonly #modelSelectionRuntime: IModelSelectionService & { dispose(): void };
+  readonly #modelSelectionSource: ReturnType<typeof createGatewayModelSelectionSource>;
   readonly #disposeModelSelectionConfiguredDefaultSource?: () => void;
   #startPromise: ReturnType<ProviderRegistryService["start"]> | null = null;
   #disposed = false;
@@ -117,13 +125,23 @@ export class ProviderRuntime {
       ensureReady,
       dependencies.testConnectivity,
       dependencies.discoverModels,
+      dependencies.settingsPolicy,
     );
+    this.#modelSelectionSource = createGatewayModelSelectionSource(this.registryService);
     this.#modelSelectionRuntime = createModelSelectionService(
-      createNodeModelSelectionFacade(this.registryService),
+      createNodeModelSelectionFacade(this.#modelSelectionSource.source),
       ensureReady,
       dependencies.modelSelectionConfiguredDefaultSource,
+      this.#modelSelectionSource.onDidInvalidate,
     );
     this.modelSelection = this.#modelSelectionRuntime;
+    if (dependencies.modelSelectionCatalogAuthority)
+      this.bindGatewayCatalogAuthority(dependencies.modelSelectionCatalogAuthority);
+  }
+
+  /** Node组合根绑定同一Gateway的私有读端口，不是模型/身份的另一个写入者。 */
+  bindGatewayCatalogAuthority(authority: GatewayCatalogAuthority): void {
+    this.#modelSelectionSource.bind(authority);
   }
 
   start(): Promise<void> {
@@ -151,6 +169,7 @@ export class ProviderRuntime {
     this.#disposed = true;
     this.#disposeBuiltinRecovery();
     this.#modelSelectionRuntime.dispose();
+    this.#modelSelectionSource.dispose();
     this.registryService.dispose();
     this.#disposeAccountSource?.();
     this.#disposeModelSelectionConfiguredDefaultSource?.();
@@ -223,7 +242,14 @@ function createSettingsMutationTarget(
 }
 
 export function createProviderRuntime(options: ProviderRuntimeOptions): ProviderRuntime {
-  const { accountSource, testConnectivity, discoverModels, ...configRuntimeOptions } = options;
+  const {
+    accountSource,
+    testConnectivity,
+    discoverModels,
+    settingsPolicy,
+    modelSelectionCatalogAuthority,
+    ...configRuntimeOptions
+  } = options;
   const configRuntime = createProviderConfigRuntime(configRuntimeOptions);
   const modelSelectionConfiguredDefaultSource = new NodeModelSelectionConfigRepository({
     personalRepository: configRuntime.personalRepository,
@@ -233,6 +259,8 @@ export function createProviderRuntime(options: ProviderRuntimeOptions): Provider
     accountSource,
     testConnectivity,
     discoverModels,
+    settingsPolicy,
+    modelSelectionCatalogAuthority,
     modelSelectionConfiguredDefaultSource,
     disposeModelSelectionConfiguredDefaultSource: () =>
       modelSelectionConfiguredDefaultSource.dispose(),

@@ -23,7 +23,14 @@ import {
   type ChannelReplyHostRequest,
   type ChannelReplyResult,
 } from "@zcode/shared";
+import type { EnterpriseModelRelay } from "../enterprise-model-relay/relay.js";
 import { requestPluginReferenceCatalog } from "#src/zcode-agent/pluginReferenceCatalogRequest.js";
+import type { EnterpriseConnectorRelay } from "../enterprise-assets/connectorRelay.js";
+import type { EnterpriseAssetsHost } from "../enterprise-assets/hostContract.js";
+import {
+  createEnterpriseToolAuthorizationBridge,
+  type EnterpriseToolAuthorizationResolver,
+} from "./enterpriseToolAuthorizationBridge.js";
 import {
   localTtftFactsSchema,
   sessionDebugSnapshotSchema,
@@ -992,6 +999,12 @@ interface CreateZCodeAgentServiceOptions extends Omit<
   ZCodeAgentProcessManagerOptions,
   "idleTimeoutMs"
 > {
+  /** Trusted Host policy resolver; Renderer is not an authorization responder. */
+  enterpriseToolAuthorization?: EnterpriseToolAuthorizationResolver;
+  enterpriseAssets?: Pick<EnterpriseAssetsHost, "readCatalog" | "authorizeAsset">;
+  /** 连接器帧出口：与资产准入同源，缺失即连接器通道整体 fail closed。 */
+  enterpriseConnectors?: EnterpriseConnectorRelay;
+  enterpriseModels?: EnterpriseModelRelay;
   /** 仅供 MCP 状态探测进程使用，不能把空闲回收传给 chat。 */
   mcpStatusIdleTimeoutMs?: number;
   accountProviderConfigSource?: ProviderSource<AccountProviderConfigSnapshot>;
@@ -1016,6 +1029,7 @@ interface CreateZCodeAgentServiceOptions extends Omit<
   resolveSessionDirectories?: (target: ZCodeAgentSessionTarget) => Promise<string[]>;
   resolveSessionRuntimePreferences?: (
     scope: ZCodeSessionRuntimePreferencesScope,
+    options?: { signal?: AbortSignal },
   ) => Promise<ZCodeSessionRuntimePreferencesResult>;
   /** manual run 落库后由当前 host 直接派发；返回时 prompt 必须已被 session 接受。 */
   onAutomationManualRunRequested?: (params: {
@@ -1261,6 +1275,18 @@ export function createZCodeAgentService(
     waitForSpawnAdmission: options?.waitForSpawnAdmission,
     lane: "mcp-status",
     idleTimeoutMs: options?.mcpStatusIdleTimeoutMs ?? MCP_STATUS_LANE_IDLE_TIMEOUT_MS,
+  });
+  const enterpriseAuthorizationBridge = createEnterpriseToolAuthorizationBridge({
+    resolver: options?.enterpriseToolAuthorization,
+    assets: options?.enterpriseAssets,
+    connectors: options?.enterpriseConnectors,
+    models: options?.enterpriseModels,
+    // 三条泳道共用此桥；仅查 chat 会把仍由独立 manager 持有的 plugin/MCP 控制面误判过时。
+    // 按同一 workspace 查询既有 owner 并比较精确 client；替换/dispose 后旧连接仍不能通过。
+    isCurrent: (workspace, client) =>
+      [processManager, pluginProcessManager, mcpStatusProcessManager].some(
+        (manager) => manager.getExistingClient(workspace) === client,
+      ),
   });
   const sessionEmitters = new Map<string, Emitter<ZCodeAgentServiceEvent>>();
   /**
@@ -2131,6 +2157,14 @@ export function createZCodeAgentService(
     const disposables = [
       topicResources,
       client.onNotification((message) => {
+        if (message.method === zcodeProtocolNotifications.enterpriseToolAuthorizationCancelled) {
+          enterpriseAuthorizationBridge.cancel(
+            client,
+            { ...workspace, workspaceKey: resolveWorkspaceKey(workspace) },
+            message.params,
+          );
+          return;
+        }
         if (message.method === zcodeProtocolNotifications.providerRuntimeHeadersCancelled) {
           const parsed = zcodeProviderRuntimeHeadersCancelledSchema.safeParse(message.params);
           if (
@@ -2470,6 +2504,31 @@ export function createZCodeAgentService(
           });
           return;
         }
+        if (
+          request.method === zcodeProtocolMethods.interactionAuthorizeEnterpriseTool ||
+          request.method === zcodeProtocolMethods.interactionReadEnterpriseSkills ||
+          request.method === zcodeProtocolMethods.interactionRequestEnterpriseConnector ||
+          request.method === zcodeProtocolMethods.interactionEnterpriseModelRequest
+        ) {
+          const handle =
+            request.method === zcodeProtocolMethods.interactionReadEnterpriseSkills
+              ? enterpriseAuthorizationBridge.handleCatalog
+              : request.method === zcodeProtocolMethods.interactionRequestEnterpriseConnector
+                ? enterpriseAuthorizationBridge.handleConnector
+                : request.method === zcodeProtocolMethods.interactionEnterpriseModelRequest
+                  ? enterpriseAuthorizationBridge.handleModel
+                  : enterpriseAuthorizationBridge.handle;
+          void handle(
+            client,
+            { ...workspace, workspaceKey: resolveWorkspaceKey(workspace) },
+            request.id,
+            request.params,
+            request.trace?.traceId,
+          ).catch(() =>
+            logger.debug(request.trace?.traceId, "Enterprise authorization response unavailable"),
+          );
+          return;
+        }
         if (request.method === zcodeProtocolMethods.sessionRequestRuntimePreferences) {
           const reportResponseFailure = (error: unknown): void => {
             logger.debug(undefined, "运行时偏好响应发送失败", {
@@ -2497,7 +2556,9 @@ export function createZCodeAgentService(
                 preferences = zcodeSessionRuntimePreferencesResultSchema.parse(
                   // 同一 RPC 承载 runtime 创建与首次执行两个时机；必须继续传递
                   // 已校验的 scope，避免首次执行为了 Shell 再次等待远端 client config。
-                  (await resolveSessionRuntimePreferences?.(parsed.data.scope)) ?? {
+                  (await resolveSessionRuntimePreferences?.(parsed.data.scope, {
+                    signal: client.disposeSignal,
+                  })) ?? {
                     askUserQuestionAutoResolutionEnabled: true,
                     nativeSearchEnhancementsEnabled: true,
                     memoryEnabled: false,
@@ -4463,6 +4524,7 @@ export function createZCodeAgentService(
           ...(params.sessionId ? { sessionId: params.sessionId } : {}),
         },
         zcodeSkillsReferenceCatalogResultSchema,
+        { timeoutMs: 75000, lifecycle: "observation" },
       );
     },
 

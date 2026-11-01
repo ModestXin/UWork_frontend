@@ -51,6 +51,7 @@ import {
   type RuntimeMessageEntry,
 } from "../../agent/message-history.js";
 import type { AgentRuntimeInternal } from "../internal.js";
+import { createPromptAttachmentAuthorizationContext } from "../helpers/attachment-authorization.js";
 
 function hasSteerInput(request: Pick<TurnSteerInput, "attachments" | "input" | "intent">): boolean {
   return (
@@ -1178,6 +1179,7 @@ export async function drainPendingInput(
     activeTurn: ActiveTurnSteeringState;
     events: SessionEvent[];
     traceContext: TraceContext;
+    abortSignal?: AbortSignal;
   },
 ): Promise<DrainedPendingInputDiagnostics | undefined> {
   if (this.permissionFullAccessPending || this.activeTurn !== options.activeTurn) return undefined;
@@ -1235,6 +1237,8 @@ async function drainPendingInputUnlocked(
     // 按 inputRouting 显式标注。落到持久 metadata 供冷恢复还原同一切分。
     const delivery = pendingInput.delivery ?? "queue";
     const resolvedAttachments = await resolveTurnAttachments(pendingInput.attachments, {
+      authorization: createPromptAttachmentAuthorizationContext(this, drainTraceContext),
+      abortSignal: options.abortSignal,
       artifactStore: this.artifactStore,
       fileSystemPort: this.fileSystemPort,
       imageProcessorPort: this.imageProcessorPort,

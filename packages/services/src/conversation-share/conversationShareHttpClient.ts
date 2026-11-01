@@ -1,6 +1,7 @@
 /* oxlint-disable eslint(max-lines) -- 一个端点一个方法 + 统一的鉴权/脱敏/错误归一化 requestData，拆分会让 HTTP 契约失去单一入口。 */
 import {
   conversationShareArtifactDescriptorSchema,
+  conversationShareInboundArtifactDescriptorSchema,
   conversationShareArtifactUploadDataSchema,
   conversationShareCapabilitiesWireSchema,
   narrowConversationShareCapabilities,
@@ -32,9 +33,19 @@ import {
   type ConversationShareRecord,
 } from "@zcode/shared";
 import { z } from "zod";
+import { createHash } from "node:crypto";
 import { createServiceLogger } from "../logger/serviceLogger.js";
 import { REQUEST_ID_HEADER_NAME, withRequestIdHeader } from "../providers/api/requestIdHeaders.js";
-import { verifyConversationShareIntegrity } from "./conversationShareIntegrity.js";
+import {
+  sha256ConversationShareJson,
+  verifyConversationShareIntegrity,
+} from "./conversationShareIntegrity.js";
+
+import type {
+  ConversationSharePublicationAuthorization,
+  ConversationShareManagedScope,
+  ConversationShareManagedTransport,
+} from "./uworkPublicationPolicy.js";
 
 const log = createServiceLogger("conversation-share-http");
 
@@ -193,6 +204,7 @@ function normalizeRequestId(value: string | null | undefined): string | undefine
 }
 
 export interface ConversationShareHttpClientOptions {
+  managedTransport?: ConversationShareManagedTransport;
   apiClient: ApiClient;
   baseUrl: string;
   tokenProvider: () => Promise<string | null>;
@@ -210,6 +222,7 @@ function parseJson(text: string): unknown {
 }
 
 export class ConversationShareHttpClient {
+  private readonly managedTransport?: ConversationShareManagedTransport;
   private readonly apiClient: ApiClient;
   private readonly baseUrl: string;
   private readonly tokenProvider: () => Promise<string | null>;
@@ -217,6 +230,7 @@ export class ConversationShareHttpClient {
   private readonly confirmTimeoutMs: number;
 
   constructor(options: ConversationShareHttpClientOptions) {
+    this.managedTransport = options.managedTransport;
     this.apiClient = options.apiClient;
     this.baseUrl = options.baseUrl;
     this.tokenProvider = options.tokenProvider;
@@ -224,12 +238,16 @@ export class ConversationShareHttpClient {
     this.confirmTimeoutMs = options.confirmTimeoutMs ?? CONFIRM_TIMEOUT_MS;
   }
 
-  async getCapabilities(): Promise<ConversationShareCapabilities> {
+  async getCapabilities(
+    authorization?: ConversationSharePublicationAuthorization,
+  ): Promise<ConversationShareCapabilities> {
     const wire = await this.requestData(
       "/shares/capabilities",
       { method: "GET" },
       conversationShareCapabilitiesWireSchema,
       "required",
+      undefined,
+      authorization,
     );
     const { capabilities, unsupportedArtifactTypes, unsupportedAccessModes } =
       narrowConversationShareCapabilities(wire);
@@ -247,6 +265,7 @@ export class ConversationShareHttpClient {
 
   createPreparation(
     input: ConversationSharePreparationRequest,
+    authorization?: ConversationSharePublicationAuthorization,
   ): Promise<ConversationSharePreparation> {
     const body = conversationSharePreparationRequestSchema.parse(input);
     return this.requestData(
@@ -254,6 +273,9 @@ export class ConversationShareHttpClient {
       this.jsonRequest("POST", body),
       conversationSharePreparationDataSchema,
       "required",
+      undefined,
+      authorization,
+      body.artifact_count > 0,
     );
   }
 
@@ -261,6 +283,7 @@ export class ConversationShareHttpClient {
     preparationId: string,
     descriptor: ConversationShareArtifactDescriptor,
     file: Blob,
+    authorization?: ConversationSharePublicationAuthorization,
   ): Promise<ConversationShareArtifactUpload> {
     const parsedDescriptor = conversationShareArtifactDescriptorSchema.parse(descriptor);
     // 安全边界：只记录公开 ID、类型与字节数，不记录 descriptor、文件名、路径、正文或鉴权头。
@@ -279,12 +302,16 @@ export class ConversationShareHttpClient {
       conversationShareArtifactUploadDataSchema,
       "required",
       computeUploadTimeoutMs(file.size, this.timeoutMs),
+      authorization,
+      true,
     );
   }
 
   confirm(
     preparationId: string,
     input: ConversationShareConfirmRequest,
+    authorization?: ConversationSharePublicationAuthorization,
+    files = false,
   ): Promise<ConversationShareRecord> {
     const body = conversationShareConfirmRequestSchema.parse(input);
     return this.requestData(
@@ -293,6 +320,8 @@ export class ConversationShareHttpClient {
       conversationShareConfirmDataSchema,
       "required",
       this.confirmTimeoutMs,
+      authorization,
+      files,
     );
   }
 
@@ -346,6 +375,226 @@ export class ConversationShareHttpClient {
     };
   }
 
+  /** managed 在导入缓存复用之前也明确拒绝，不能借本地历史完成记录绕过只读语义。 */
+  async assertImportAllowed(
+    shareCode: string,
+    input: ConversationShareContinuationRequest,
+  ): Promise<void> {
+    if (!this.managedTransport) return;
+    await this.managedTransport.run(async (scope) => {
+      const response = await scope.request(
+        `/api/client/shares/${encodeURIComponent(shareCode)}/continuation`,
+        input,
+        { method: "POST" },
+      );
+      if (response.status >= 400) this.throwManagedError(response);
+      throw new ConversationShareClientError({
+        kind: "import_not_allowed",
+        message: "Enterprise shares are readonly",
+      });
+    });
+  }
+
+  /** Host 只读附件通过同源有限 JSON 端口，不使用浏览器下载路由或匿名/default fetch。 */
+  async downloadManagedArtifact(
+    url: string,
+    expected: ConversationShareArtifactDescriptor,
+    signal?: AbortSignal,
+  ): Promise<
+    { managed: false } | { managed: true; value: { bytes: Uint8Array; responseMimeType: string } }
+  > {
+    if (!this.managedTransport) return { managed: false };
+    return this.managedTransport.run(
+      async (scope) => {
+        const target = this.managedUrl(url, scope.origin);
+        const match =
+          /^\/api\/client\/shares\/([A-Za-z0-9._~-]{1,128})\/artifacts\/([A-Za-z0-9._~-]{1,128})$/.exec(
+            target.pathname,
+          );
+        if (!match || match[2] !== expected.artifact_id) this.invalidManagedContract();
+        const response = await scope.request(target.pathname, undefined, { method: "GET" });
+        if (response.status >= 400) this.throwManagedError(response);
+        const parsed = z
+          .object({
+            descriptor: conversationShareInboundArtifactDescriptorSchema,
+            content_base64: z.string().max(Math.ceil(524288 / 3) * 4),
+          })
+          .strict()
+          .safeParse(response.body);
+        if (!parsed.success) this.invalidManagedContract();
+        const data = parsed.data;
+        const bytes = Buffer.from(data.content_base64, "base64");
+        const expectedDescriptor = conversationShareInboundArtifactDescriptorSchema.parse(expected);
+        if (
+          bytes.byteLength > 524288 ||
+          bytes.toString("base64") !== data.content_base64 ||
+          bytes.byteLength !== data.descriptor.size_bytes ||
+          createHash("sha256").update(bytes).digest("hex") !== data.descriptor.sha256 ||
+          sha256ConversationShareJson(data.descriptor) !==
+            sha256ConversationShareJson(expectedDescriptor)
+        )
+          this.invalidManagedContract();
+        await scope.assertCurrent();
+        return { bytes: new Uint8Array(bytes), responseMimeType: data.descriptor.mime_type };
+      },
+      { signal },
+    );
+  }
+
+  private invalidManagedContract(): never {
+    throw new ConversationShareClientError({
+      kind: "invalid_contract",
+      message: "Enterprise share response is invalid",
+    });
+  }
+  private managedUrl(value: string, origin: string): URL {
+    let url: URL;
+    try {
+      url = new URL(value);
+    } catch {
+      return this.invalidManagedContract();
+    }
+    if (
+      url.href !== value ||
+      url.origin !== origin ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash
+    )
+      this.invalidManagedContract();
+    return url;
+  }
+  private throwManagedError(response: { status: number; body: unknown }): never {
+    const parsed = z
+      .object({
+        error: z.object({ code: z.string().max(128) }),
+        requestId: z.string().max(128).optional(),
+      })
+      .safeParse(response.body);
+    const code = parsed.success ? parsed.data.error.code : undefined;
+    const kind: ConversationShareClientErrorKind =
+      response.status === 401
+        ? "authentication_required"
+        : code === "SHARE_READONLY"
+          ? "import_not_allowed"
+          : response.status === 429
+            ? "limit_exceeded"
+            : response.status >= 500
+              ? "network"
+              : response.status === 404
+                ? "not_found"
+                : response.status === 403
+                  ? "feature_disabled"
+                  : "invalid_contract";
+    throw new ConversationShareClientError({
+      kind,
+      status: response.status,
+      message: "Enterprise share request was rejected",
+      ...(parsed.success ? { requestId: parsed.data.requestId } : {}),
+    });
+  }
+  private validateManagedData(path: string, value: unknown, origin: string): void {
+    if (!value || typeof value !== "object") this.invalidManagedContract();
+    const data = value as Record<string, unknown>;
+    if ("schema_version" in data && data.schema_version !== 1)
+      throw new ConversationShareClientError({
+        kind: "unsupported_schema_version",
+        message: "Enterprise share schema requires a newer client",
+      });
+    if (path === "/shares/capabilities") {
+      if (
+        !Array.isArray(data.access_modes) ||
+        data.access_modes.length !== 1 ||
+        data.access_modes[0] !== "organization"
+      )
+        this.invalidManagedContract();
+    }
+    const record =
+      data.share && typeof data.share === "object" ? (data.share as Record<string, unknown>) : data;
+    if ("access_mode" in record && record.access_mode !== "organization")
+      this.invalidManagedContract();
+    if ("share_url" in record) {
+      if (
+        typeof record.share_url !== "string" ||
+        typeof record.share_code !== "string" ||
+        !/^[A-Za-z0-9._~-]{1,128}$/.test(record.share_code) ||
+        [".", ".."].includes(record.share_code)
+      )
+        this.invalidManagedContract();
+      const url = this.managedUrl(record.share_url, origin);
+      if (
+        url.pathname !== `/share/${record.share_code}` &&
+        url.pathname !== `/cn/share/${record.share_code}`
+      )
+        this.invalidManagedContract();
+    }
+    const preview = /^\/shares\/([A-Za-z0-9._~-]{1,128})\/preview$/.exec(path);
+    if (preview) {
+      const parsed = conversationSharePreviewDataSchema.safeParse(value);
+      if (
+        !parsed.success ||
+        !verifyConversationShareIntegrity({
+          rawRows: data.rows,
+          rawArtifacts: data.artifacts,
+          integrity: parsed.data.integrity,
+        })
+      )
+        this.invalidManagedContract();
+      for (const artifact of parsed.data.artifacts) {
+        const url = this.managedUrl(artifact.url, origin);
+        if (url.pathname !== `/api/client/shares/${preview[1]}/artifacts/${artifact.artifact_id}`)
+          this.invalidManagedContract();
+      }
+    }
+  }
+  private async requestManaged<T>(
+    scope: ConversationShareManagedScope,
+    path: string,
+    init: ApiRequestInit,
+    schema: z.ZodType<T>,
+    authorization?: ConversationSharePublicationAuthorization,
+    files = false,
+  ): Promise<T> {
+    await authorization?.authorize(files);
+    await scope.assertCurrent();
+    let body: unknown;
+    if (typeof init.body === "string") {
+      try {
+        body = JSON.parse(init.body) as unknown;
+      } catch {
+        return this.invalidManagedContract();
+      }
+    } else if (init.body instanceof FormData) {
+      const descriptor = init.body.get("descriptor"),
+        file = init.body.get("file");
+      if (typeof descriptor !== "string" || !(file instanceof Blob) || file.size > 524288)
+        this.invalidManagedContract();
+      const bytes = Buffer.from(await file.arrayBuffer());
+      await authorization?.authorize(true);
+      await scope.assertCurrent();
+      body = {
+        descriptor: JSON.parse(descriptor) as unknown,
+        content_base64: bytes.toString("base64"),
+      };
+    } else if (init.body !== undefined && init.body !== null) this.invalidManagedContract();
+    const method = init.method ?? (body === undefined ? "GET" : "POST");
+    if (method !== "GET" && method !== "POST" && method !== "DELETE") this.invalidManagedContract();
+    const response = await scope.request(`/api/client${path}`, body, { method });
+    await authorization?.authorize(files);
+    if (response.status < 200 || response.status >= 300) this.throwManagedError(response);
+    if (path.endsWith("/continuation"))
+      throw new ConversationShareClientError({
+        kind: "import_not_allowed",
+        message: "Enterprise shares are readonly",
+      });
+    this.validateManagedData(path, response.body, scope.origin);
+    const parsed = schema.safeParse(response.body);
+    if (!parsed.success) this.invalidManagedContract();
+    await scope.assertCurrent();
+    return parsed.data;
+  }
+
   /**
    * 版本高于本端认知时不猜语义，也不混进 invalid_contract：用户该看到「请升级 ZCode」，
    * 不是「分享格式无效」。低于或等于本端版本一律继续——新增 kind/enum 由逐行降级消化。
@@ -387,13 +636,42 @@ export class ConversationShareHttpClient {
     };
   }
 
+  private async assertStillUnmanaged(): Promise<void> {
+    if (!this.managedTransport) return;
+    await this.managedTransport.run(async () => {
+      throw new ConversationShareClientError({
+        kind: "feature_disabled",
+        message: "Enterprise sharing scope changed",
+      });
+    });
+  }
+
   private async requestData<T>(
     path: string,
     init: ApiRequestInit,
     dataSchema: z.ZodType<T>,
     auth: "required" | "optional",
     timeoutMsOverride?: number,
+    authorization?: ConversationSharePublicationAuthorization,
+    files = false,
   ): Promise<T> {
+    // 在读取旧 OAuth 之前分流；发布已有原 scope 时绝不再次 backend.run 换成新身份。
+    if (authorization?.managedScope)
+      return this.requestManaged(
+        authorization.managedScope,
+        path,
+        init,
+        dataSchema,
+        authorization,
+        files,
+      );
+    if (!authorization && this.managedTransport) {
+      const managed = await this.managedTransport.run((scope) =>
+        this.requestManaged(scope, path, init, dataSchema),
+      );
+      if (managed.managed) return managed.value;
+    }
+    if (authorization) await authorization.authorize(files);
     const token = (await this.tokenProvider())?.trim() || null;
     if (auth === "required" && !token) {
       throw new ConversationShareClientError({
@@ -409,11 +687,24 @@ export class ConversationShareHttpClient {
     if (token) headers.set("Authorization", `Bearer ${token}`);
     const url = joinUrl(this.baseUrl, path);
     const clientRequestId = normalizeRequestId(headers.get(REQUEST_ID_HEADER_NAME));
+    // tokenProvider 可能等待 IO；企业裁决必须在它之后、真实请求之前再次执行。
+    const publicationSignal = await authorization?.authorize(files);
+    if (!authorization) await this.assertStillUnmanaged();
     let response: Response;
+    let dispatchedTarget: string | undefined;
     try {
       response = await this.apiClient.request(url, {
         ...init,
         headers: Object.fromEntries(headers.entries()),
+        ...(publicationSignal ? { signal: publicationSignal, redirect: "error" as const } : {}),
+        ...(authorization
+          ? {
+              beforeDispatch: async (target: string) => {
+                await authorization.authorize(files, target);
+                dispatchedTarget = target;
+              },
+            }
+          : {}),
         timeoutMs: timeoutMsOverride ?? this.timeoutMs,
       });
     } catch (error) {
@@ -426,6 +717,9 @@ export class ConversationShareHttpClient {
       });
     }
 
+    if (!authorization) await this.assertStillUnmanaged();
+    // 响应等待期间也可能撤销网络/域名许可；复核实际出口，不只复核分享开关。
+    await authorization?.authorize(files, dispatchedTarget);
     const responseRequestId = normalizeRequestId(response.headers.get(REQUEST_ID_HEADER_NAME));
     let text: string;
     try {

@@ -300,6 +300,20 @@ export class NodeApiClient implements ApiClient {
           }, timeoutMs)
         : null;
 
+    let dispatchFailure: unknown;
+    let dispatchRejected = false;
+    const dispatchGuard = init?.beforeDispatch;
+    const beforeDispatch = dispatchGuard
+      ? async (target: string) => {
+          try {
+            await dispatchGuard(target);
+          } catch (error) {
+            dispatchRejected = true;
+            dispatchFailure = error;
+            throw error;
+          }
+        }
+      : undefined;
     try {
       const signal = controller
         ? init?.signal
@@ -328,9 +342,13 @@ export class NodeApiClient implements ApiClient {
           url,
         });
       }
+      // endpoint origin 可能来自异步设置；裁决必须消费最终URL，不能复用其等待前的允许。
+      await beforeDispatch?.(url);
+      signal?.throwIfAborted();
       const response = await fetchImpl(requestInput, {
         ...init,
         headers: requestHeaders,
+        ...(beforeDispatch ? { beforeDispatch } : {}),
         ...(signal ? { signal } : {}),
       });
       if ([200, 401, 403].includes(response.status) && this.onZcodeJwtInvalid) {
@@ -383,6 +401,7 @@ export class NodeApiClient implements ApiClient {
       if (signal?.aborted) throw new DOMException("The operation was aborted.", "AbortError");
       return response;
     } catch (error) {
+      if (dispatchRejected && error === dispatchFailure) throw error;
       if (error instanceof ApiError) {
         throw error;
       }

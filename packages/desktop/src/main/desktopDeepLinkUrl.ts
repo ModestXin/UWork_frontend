@@ -1,3 +1,5 @@
+import { Buffer } from "node:buffer";
+
 const DEEP_LINK_SCHEME = "zcode";
 const DEEP_LINK_RE = /\bzcode:(?:\/\/|\/)?[^\s"'<>]+/i;
 const OAUTH_CALLBACK_HOSTS = new Set(["oauth"]);
@@ -7,6 +9,35 @@ const SHARE_IMPORT_HOST = "share";
 const DEEP_LINK_ADDITIONAL_DATA_KEY = "deepLinkUrl";
 const OPEN_WORKSPACE_ADDITIONAL_DATA_KEY = "openWorkspacePath";
 const OPEN_WORKSPACE_ARG = "--open-workspace";
+const SINGLE_INSTANCE_WIRE_FAMILY = "uwork-si:";
+const SINGLE_INSTANCE_WIRE_PREFIX = `${SINGLE_INSTANCE_WIRE_FAMILY}v1:`;
+
+function encodeSingleInstanceValue(value: string | null): string | null {
+  if (value === null) return null;
+  if (!/[^\x20-\x7e]/u.test(value) && !value.startsWith(SINGLE_INSTANCE_WIRE_FAMILY)) {
+    // Unicode 外壳的 slice/trim 可能保留双字节存储；无损重分配后再交给 V8。
+    return Buffer.from(value, "ascii").toString("ascii");
+  }
+  try {
+    return SINGLE_INSTANCE_WIRE_PREFIX + encodeURIComponent(value);
+  } catch {
+    return null;
+  }
+}
+
+function decodeSingleInstanceValue(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const candidate = value.trim();
+  if (!candidate.startsWith(SINGLE_INSTANCE_WIRE_FAMILY)) return candidate;
+  if (!candidate.startsWith(SINGLE_INSTANCE_WIRE_PREFIX)) return null;
+  const payload = candidate.slice(SINGLE_INSTANCE_WIRE_PREFIX.length);
+  if (/[^\x21-\x7e]/u.test(payload)) return null;
+  try {
+    return decodeURIComponent(payload);
+  } catch {
+    return null;
+  }
+}
 
 function normalizeOAuthCallbackPath(pathname: string): string {
   const withoutTrailingSlash = pathname.replace(/\/+$/, "");
@@ -249,8 +280,10 @@ export function extractOpenWorkspacePathFromArgs(args: readonly string[]): strin
 }
 
 export function createDeepLinkSingleInstanceData(args: readonly string[]): Record<string, string> {
-  const url = extractDeepLinkUrlFromArgs(args);
-  const openWorkspacePath = extractOpenWorkspacePathFromArgs(args);
+  // Electron41 的 POSIX parser 会 trim 按 NUL 分段的 V8 字节；
+  // 保留安全 ASCII 原值，其余用 ASCII wire，避免中文空格路径的双字节序列被截短。
+  const url = encodeSingleInstanceValue(extractDeepLinkUrlFromArgs(args));
+  const openWorkspacePath = encodeSingleInstanceValue(extractOpenWorkspacePathFromArgs(args));
   return {
     ...(url ? { [DEEP_LINK_ADDITIONAL_DATA_KEY]: url } : {}),
     ...(openWorkspacePath ? { [OPEN_WORKSPACE_ADDITIONAL_DATA_KEY]: openWorkspacePath } : {}),
@@ -262,8 +295,10 @@ export function extractDeepLinkUrlFromSingleInstanceData(additionalData: unknown
     return null;
   }
 
-  const value = (additionalData as Record<string, unknown>)[DEEP_LINK_ADDITIONAL_DATA_KEY];
-  if (typeof value !== "string") {
+  const value = decodeSingleInstanceValue(
+    (additionalData as Record<string, unknown>)[DEEP_LINK_ADDITIONAL_DATA_KEY],
+  );
+  if (value === null) {
     return null;
   }
 
@@ -277,8 +312,10 @@ export function extractOpenWorkspacePathFromSingleInstanceData(
     return null;
   }
 
-  const value = (additionalData as Record<string, unknown>)[OPEN_WORKSPACE_ADDITIONAL_DATA_KEY];
-  if (typeof value !== "string") {
+  const value = decodeSingleInstanceValue(
+    (additionalData as Record<string, unknown>)[OPEN_WORKSPACE_ADDITIONAL_DATA_KEY],
+  );
+  if (value === null) {
     return null;
   }
 

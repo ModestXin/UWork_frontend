@@ -114,6 +114,15 @@ export class RendererUserActionTelemetry implements UserActionTelemetry {
   }
 
   updateConfig(config: RendererActionTraceConfigV1): void {
+    // 身份/child/发布决定改变后，旧 handle 和已完成批次不能盖成新 owner 的 epoch。
+    if (config.bindingEpoch !== this.config.bindingEpoch) {
+      if (this.flushTimer !== undefined) clearTimeout(this.flushTimer);
+      this.flushTimer = undefined;
+      this.completedQueue.splice(0);
+      for (const active of this.activeActions) clearTimeout(active.timeout);
+      this.activeActions.clear();
+      this.droppedSinceLastFlush = 0;
+    }
     this.config = config;
   }
 
@@ -176,6 +185,7 @@ export class RendererUserActionTelemetry implements UserActionTelemetry {
       if (spans.length === 0) break;
       const batch: RendererActionTraceBatchV1 = {
         version: 1,
+        ...(this.config.bindingEpoch ? { bindingEpoch: this.config.bindingEpoch } : {}),
         rendererInstanceId: this.resource.rendererInstanceId,
         sequence: this.sequence++,
         droppedSinceLastFlush: this.droppedSinceLastFlush,

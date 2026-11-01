@@ -9,6 +9,7 @@ import {
 
 interface SecondInstanceWorkspaceDeps {
   additionalData: unknown;
+  isRequestActive?: () => boolean;
   argv: readonly string[];
   handleDeepLink: (
     url: string,
@@ -26,6 +27,19 @@ interface SecondInstanceWorkspaceDeps {
   ) => boolean;
   workspaceConfirmationCopy?: ExternalWorkspaceOpenDialogCopy;
   resolveApplicationWindow?: () => BrowserWindow | null;
+}
+
+export function dispatchSecondInstanceWorkspaceRequest(
+  deps: SecondInstanceWorkspaceDeps,
+  onUnhandled: () => void,
+): void {
+  const request = { ...deps, argv: [...deps.argv] };
+  // Electron 同步通知返回后才写单实例 ACK；原生确认阻塞该边界时，Linux 第二进程会误杀原实例。
+  // 下一轮事件循环继续原校验/确认，不用任意延迟或绕过用户确认来掩盖握手问题。
+  setImmediate(() => {
+    if (request.isRequestActive && !request.isRequestActive()) return;
+    if (!handleSecondInstanceWorkspaceRequest(request)) onUnhandled();
+  });
 }
 
 export function handleSecondInstanceWorkspaceRequest(deps: SecondInstanceWorkspaceDeps): boolean {

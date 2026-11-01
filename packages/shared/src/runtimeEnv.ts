@@ -1,4 +1,6 @@
 export const ZCODE_RUNTIME_ENV_KEY = "ZCODE_RUNTIME_ENV";
+/** Trusted Host bootstrap gate; no credential and no workspace/session override. */
+export const ZCODE_ENTERPRISE_POLICY_REQUIRED_ENV_KEY = "ZCODE_ENTERPRISE_POLICY_REQUIRED";
 export const ZCODE_HTTP_PROXY_ENV_KEY = "ZCODE_HTTP_PROXY";
 export const ZCODE_NO_PROXY_ENV_KEY = "ZCODE_NO_PROXY";
 /** Desktop Host 只向 desktop-attached remote server 传递一次的网络配置。 */

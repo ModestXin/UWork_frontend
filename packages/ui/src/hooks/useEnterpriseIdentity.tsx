@@ -3,6 +3,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
@@ -18,19 +19,24 @@ import {
   enterpriseLoginRequestSchema,
   enterpriseIdentityViewSchema,
   type EnterpriseIdentityView,
-  type EnterpriseIdentityAttempt,
   type EnterpriseLoginSurface,
+  type UWorkClientPresentation,
 } from "@zcode/shared";
 import { useEnterpriseIdentityStore } from "@/store/enterpriseIdentityStore.js";
 import { usePlatform } from "@/hooks/usePlatform.js";
 import { EnterpriseLoginPage } from "@/login/EnterpriseLoginPage.js";
 import { UcasApiKeyDialog } from "@/login/UcasApiKeyDialog.js";
-import { hasConfiguredUcasApiKey } from "@/login/ucasApiKeyPrompt.js";
+import { shouldRequestUcasApiKey } from "@/login/ucasApiKeyPrompt.js";
 import { logger } from "@/logger.js";
 import { createEnterpriseLoginSurfaceGate } from "./enterpriseLoginSurfaceGate.js";
+import { useClientPresentation } from "./useClientPresentation.js";
+import { createEnterpriseLoginOperations } from "./enterpriseLoginErrorPresentation.js";
+
+const warnCancellation = () => logger.warn("Enterprise login cancellation failed");
 
 interface IdentityContextValue {
   view: EnterpriseIdentityView | null;
+  presentation: UWorkClientPresentation | null;
   allowLogin: boolean;
   openLogin(): void;
   logout(): Promise<void>;
@@ -63,92 +69,107 @@ export function EnterpriseIdentityProvider({
   const platform = usePlatform();
   const owner = service ?? null;
   const view = useEnterpriseIdentityStore((state) => (state.owner === owner ? state.view : null));
+  const presentation = useClientPresentation(owner, view);
   const [open, setOpen] = useState(showOnStartup);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState(false);
+  const [, refreshError] = useState(0);
   const [showUcasApiKeyPrompt, setShowUcasApiKeyPrompt] = useState(false);
   const actionGeneration = useRef(0);
-  const nativeAttemptId = useRef<string | null>(null);
-  const pendingStart = useRef<Promise<EnterpriseIdentityAttempt> | null>(null);
-  const startCancellation = useRef<Promise<void>>(Promise.resolve());
+  // 本窗口异步句柄随 owner 一起更换；B 不能等待 A 的屏障或用 B 取消 A 的 ID。
+  // A 的旧闭包仍持有原句柄，迟到 begin 会沿原 owner 完成精确取消。
+  const operations = useMemo(
+    () => createEnterpriseLoginOperations(() => refreshError((value) => value + 1)),
+    [owner],
+  );
+  const errors = operations.errors;
+  const projectView = useCallback(
+    (candidate: EnterpriseIdentityView) => {
+      errors.observe(candidate);
+      if (owner) useEnterpriseIdentityStore.getState().project(owner, candidate);
+    },
+    [owner, errors],
+  );
   // 无 ID 的启动也属于本窗口：返回后先结算并取消旧启动，再放行下一次登录。
   const cancelPendingStart = useCallback(() => {
-    const pending = pendingStart.current;
+    const pending = operations.pendingStart;
     if (!pending || !owner) return;
     const cancellation = pending.then(
       (attempt) => owner.cancelLogin(attempt.id),
       () => {},
     );
-    startCancellation.current = cancellation;
+    operations.startCancellation = cancellation;
     // 只记录失败，不把失败屏障转换为成功，否则下一次仍会复用未取消的启动。
-    void cancellation.catch(() => logger.warn("Enterprise login cancellation failed"));
-  }, [owner]);
-  const activeAttemptId = useRef<string | null>(null);
+    void cancellation.catch(warnCancellation);
+  }, [owner, operations]);
   const gatewaySyncRef = useRef<string | null>(null);
   const [surfaceGate] = useState(createEnterpriseLoginSurfaceGate);
-  const surfaceController = useRef<AbortController | null>(null);
+  const closeSurface = useCallback(() => {
+    operations.surfaceController?.abort();
+    operations.surfaceController = null;
+    if (operations.nativeAttemptId) platform.cancelEnterpriseLogin?.(operations.nativeAttemptId);
+    operations.nativeAttemptId = null;
+  }, [platform, operations]);
   const onSurface = useCallback(
     (surface: EnterpriseLoginSurface | null) => {
       surfaceGate.publish(surface);
-      if (nativeAttemptId.current)
-        platform.updateEnterpriseLogin?.({ id: nativeAttemptId.current, surface });
+      if (operations.nativeAttemptId)
+        platform.updateEnterpriseLogin?.({ id: operations.nativeAttemptId, surface });
     },
-    [platform, surfaceGate],
+    [platform, surfaceGate, operations],
   );
 
   useEffect(() => {
     const store = useEnterpriseIdentityStore.getState();
     store.attach(owner);
+    setBusy(false);
     let active = true;
     const apply = (candidate: unknown) => {
       if (!active || !owner) return;
       const parsed = enterpriseIdentityViewSchema.safeParse(candidate);
       if (!parsed.success) {
-        setError(true);
+        errors.fail(errors.ticket);
         return;
       }
-      store.project(owner, parsed.data);
+      projectView(parsed.data);
     };
     if (!owner) return;
     // 先订阅，再读取；revision 防止慢快照覆盖更新的认证事件。
     const subscription = owner.onDidChange(apply);
     const restoreGeneration = actionGeneration.current;
+    const restoreTicket = errors.ticket;
     void (allowLogin ? owner.restoreSession() : owner.getView()).then(apply).catch(() => {
       // 跳过或重新发起登录后，旧恢复失败不能污染新登录页的错误状态。
       if (active && actionGeneration.current === restoreGeneration) {
-        setError(true);
+        errors.fail(restoreTicket);
         logger.warn("Enterprise identity restore failed");
       }
     });
     return () => {
       active = false;
       actionGeneration.current++;
-      surfaceController.current?.abort();
-      surfaceController.current = null;
-      if (nativeAttemptId.current) platform.cancelEnterpriseLogin?.(nativeAttemptId.current);
-      nativeAttemptId.current = null;
+      errors.begin("clear");
+      closeSurface();
+      const attemptId = operations.activeAttemptId;
+      operations.activeAttemptId = null;
+      if (attemptId) void owner.cancelLogin(attemptId).catch(warnCancellation);
       subscription.dispose();
     };
-  }, [owner, allowLogin, platform]);
+  }, [owner, allowLogin, errors, projectView, closeSurface]);
 
   useEffect(() => {
     if (view?.status === "authenticated") {
-      activeAttemptId.current = null;
+      operations.activeAttemptId = null;
       setOpen(false);
       setBusy(false);
-      setError(false);
     } else {
       setShowUcasApiKeyPrompt(false);
     }
-    if (view?.status !== "waiting" && surfaceController.current) {
+    if (view?.status !== "waiting" && operations.surfaceController) {
       actionGeneration.current++;
-      surfaceController.current.abort();
-      surfaceController.current = null;
-      if (nativeAttemptId.current) platform.cancelEnterpriseLogin?.(nativeAttemptId.current);
-      nativeAttemptId.current = null;
+      closeSurface();
       setBusy(false);
     }
-  }, [view?.status, platform]);
+  }, [view?.status, operations, closeSurface]);
 
   useEffect(() => {
     if (!ucasGatewayService || !allowLogin) return;
@@ -168,19 +189,18 @@ export function EnterpriseIdentityProvider({
     // 一次性 code，只能靠 Host 的握手轮询认领会话；窗口内回调路径仍由 completeLogin 结算。
     if (!owner || !allowLogin || view?.status !== "waiting") return;
     const pollGeneration = actionGeneration.current;
+    const pollTicket = errors.ticket;
     let active = true;
     let timer: ReturnType<typeof setTimeout>;
     const poll = async () => {
       try {
         const candidate = await owner.pollLogin(view.pending.id);
         if (!active) return;
-        useEnterpriseIdentityStore
-          .getState()
-          .project(owner, enterpriseIdentityViewSchema.parse(candidate));
+        projectView(enterpriseIdentityViewSchema.parse(candidate));
         if (candidate.status === "waiting") timer = setTimeout(() => void poll(), 1500);
       } catch {
         if (active && actionGeneration.current === pollGeneration) {
-          setError(true);
+          errors.fail(pollTicket);
           logger.warn("Enterprise identity polling failed");
         }
       }
@@ -190,101 +210,81 @@ export function EnterpriseIdentityProvider({
       active = false;
       clearTimeout(timer);
     };
-  }, [owner, allowLogin, view?.status, view?.pending?.id]);
+  }, [owner, allowLogin, view?.status, view?.pending?.id, errors, projectView]);
 
-  const skip = useCallback(() => {
+  const cancelCurrentAttempt = (close = false) => {
     cancelPendingStart();
     actionGeneration.current++;
+    errors.begin("clear");
     setShowUcasApiKeyPrompt(false);
-    surfaceController.current?.abort();
-    surfaceController.current = null;
+    closeSurface();
     setBusy(false);
-    setOpen(false);
-    if (nativeAttemptId.current) platform.cancelEnterpriseLogin?.(nativeAttemptId.current);
-    nativeAttemptId.current = null;
+    if (close) setOpen(false);
     // 跳过只是关闭本窗口入口；无 attempt ID 的取消会中止 Host 正在恢复的设备会话。
-    const attemptId = activeAttemptId.current;
-    activeAttemptId.current = null;
-    if (owner && allowLogin && attemptId)
-      void owner
-        .cancelLogin(attemptId)
-        .catch(() => logger.warn("Enterprise login cancellation failed"));
-  }, [owner, allowLogin, platform, cancelPendingStart]);
-  /** 二维码阶段返回公司选择：取消本次尝试但保留登录入口（与「跳过」的区别是不关弹窗）。 */
-  const backToOrganizations = useCallback(() => {
-    cancelPendingStart();
-    actionGeneration.current++;
-    setShowUcasApiKeyPrompt(false);
-    surfaceController.current?.abort();
-    surfaceController.current = null;
-    setBusy(false);
-    setError(false);
-    if (nativeAttemptId.current) platform.cancelEnterpriseLogin?.(nativeAttemptId.current);
-    nativeAttemptId.current = null;
-    const attemptId = activeAttemptId.current;
-    activeAttemptId.current = null;
-    if (owner && allowLogin && attemptId)
-      void owner
-        .cancelLogin(attemptId)
-        .catch(() => logger.warn("Enterprise login cancellation failed"));
-  }, [owner, allowLogin, platform, cancelPendingStart]);
+    const attemptId = operations.activeAttemptId;
+    operations.activeAttemptId = null;
+    if (owner && allowLogin && attemptId) void owner.cancelLogin(attemptId).catch(warnCancellation);
+  };
   const login = useCallback(async () => {
     if (!owner || !allowLogin || busy) return;
     const generation = ++actionGeneration.current;
+    const ticket = errors.begin("admission");
     setShowUcasApiKeyPrompt(false);
-    surfaceController.current?.abort();
+    operations.surfaceController?.abort();
     // beginLogin 尚未返回时外部轮询可能已经认证成功；此时不能保留只属于原生扫码的
     // controller，否则认证 effect 会误触发取消并让迟到的 beginLogin 继续取消已完成的登录。
-    surfaceController.current = null;
+    operations.surfaceController = null;
     let controller: AbortController | null = null;
     setBusy(true);
-    setError(false);
     let startedAttemptId: string | null = null;
     try {
-      await startCancellation.current;
+      await operations.startCancellation;
       if (generation !== actionGeneration.current) return;
+      errors.admit(ticket);
       const starting = owner.beginLogin();
-      pendingStart.current = starting;
+      operations.pendingStart = starting;
       const attempt = enterpriseIdentityAttemptSchema.parse(await starting);
       startedAttemptId = attempt.id;
       if (generation !== actionGeneration.current) {
         // beginLogin 可能在跳过后才返回；只取消刚取得的这次尝试。
-        void owner
-          .cancelLogin(attempt.id)
-          .catch(() => logger.warn("Enterprise login cancellation failed"));
+        void owner.cancelLogin(attempt.id).catch(warnCancellation);
         return;
       }
-      if (pendingStart.current === starting) pendingStart.current = null;
-      activeAttemptId.current = attempt.id;
+      if (operations.pendingStart === starting) operations.pendingStart = null;
+      const projection = useEnterpriseIdentityStore.getState();
+      // 快速认证仍由原投影决定；提示票据不拥有认证。已知同 ID 失败也不能再打开扫码页。
+      if (projection.owner === owner && projection.view?.status === "authenticated") return;
+      if (errors.bind(ticket, attempt.id)) return;
+      operations.activeAttemptId = attempt.id;
       if (attempt.callbackUrl) {
         if (!platform.openEnterpriseLogin)
           throw new Error("Desktop enterprise login is unavailable");
         controller = new AbortController();
-        surfaceController.current = controller;
+        operations.surfaceController = controller;
         const surface = await surfaceGate.wait(controller.signal);
         if (generation !== actionGeneration.current) return;
-        nativeAttemptId.current = attempt.id;
+        operations.nativeAttemptId = attempt.id;
         const callback = await platform.openEnterpriseLogin(
           enterpriseLoginRequestSchema.parse({ ...attempt, surface }),
         );
         if (generation !== actionGeneration.current) return;
-        nativeAttemptId.current = null;
+        operations.nativeAttemptId = null;
         if (callback === null) await owner.cancelLogin(attempt.id);
         else {
           // 回调已离开原生扫码视图；先结束 surface 等待，再让 Host 发布认证状态。
           // 否则认证事件会触发下方 effect 误判为扫码取消，使成功后的引导失效。
-          surfaceController.current = null;
+          operations.surfaceController = null;
           const completion = enterpriseIdentityCompletionSchema.parse(
             await owner.completeLogin(attempt.id, callback),
           );
           if (generation === actionGeneration.current) {
-            useEnterpriseIdentityStore.getState().project(owner, completion.view);
+            projectView(completion.view);
             if (
               completion.view.status === "authenticated" &&
               completion.committedAttemptId === attempt.id
             ) {
               try {
-                // 登录完成后先自动配置网关地址与 API Key；只有拿不到 Key 才回退手工输入。
+                // 自有 UWork 只配置会话出口；缺 Key 引导仅保留给旧 UCAS 协议。
                 const provisioning = ucasGatewayService
                   ? await ucasGatewayService.sync("login")
                   : null;
@@ -298,101 +298,110 @@ export function EnterpriseIdentityProvider({
                   provisioning?.providerHasApiKey !== true
                 ) {
                   const providerView = await providerSettingsService.refresh("ucas-login-prompt");
-                  if (!hasConfiguredUcasApiKey(providerView)) setShowUcasApiKeyPrompt(true);
+                  if (shouldRequestUcasApiKey(providerView, provisioning?.view.authMode))
+                    setShowUcasApiKeyPrompt(true);
                 }
               } catch {
-                // 网关同步或 Provider Settings 刷新失败不影响已完成的企业登录；模型设置仍可单独录入密钥。
+                // 同步失败不撤销已完成的登录，也不把企业会话降级为手工密钥流程。
                 logger.warn("UCAS provisioning after enterprise login failed");
               }
             }
           }
         }
-        if (activeAttemptId.current === attempt.id) activeAttemptId.current = null;
+        if (operations.activeAttemptId === attempt.id) operations.activeAttemptId = null;
       } else {
         // waiting 事件的快速轮询可先于 beginLogin 返回并完成认证；打开授权页前
         // 复核 Host 与本窗口投影，避免已完成的身份再弹出过期浏览器登录页。
         const latest = enterpriseIdentityViewSchema.parse(await owner.getView());
         if (generation !== actionGeneration.current) return;
         const projection = useEnterpriseIdentityStore.getState();
-        if (latest.status === "authenticated") projection.project(owner, latest);
+        if (latest.status === "authenticated") projectView(latest);
         if (
           latest.status === "authenticated" ||
           (projection.owner === owner && projection.view?.status === "authenticated")
         ) {
-          if (activeAttemptId.current === attempt.id) activeAttemptId.current = null;
+          if (operations.activeAttemptId === attempt.id) operations.activeAttemptId = null;
           return;
         }
         platform.openExternal(attempt.authorizationUrl);
       }
     } catch {
       if (generation === actionGeneration.current) {
-        setError(true);
+        errors.fail(ticket);
         if (startedAttemptId) {
           // 就绪握手或 native 打开也可能失败；所有已开始的尝试都要取消，不能只清理已经显示的 view。
           platform.cancelEnterpriseLogin?.(startedAttemptId);
-          nativeAttemptId.current = null;
-          void owner
-            .cancelLogin(startedAttemptId)
-            .catch(() => logger.warn("Enterprise login cancellation failed"));
-          if (activeAttemptId.current === startedAttemptId) activeAttemptId.current = null;
+          operations.nativeAttemptId = null;
+          void owner.cancelLogin(startedAttemptId).catch(warnCancellation);
+          if (operations.activeAttemptId === startedAttemptId) operations.activeAttemptId = null;
         }
         logger.warn("Enterprise login failed");
       }
     } finally {
-      if (controller && surfaceController.current === controller) surfaceController.current = null;
+      if (controller && operations.surfaceController === controller)
+        operations.surfaceController = null;
       if (generation === actionGeneration.current) setBusy(false);
     }
-  }, [owner, allowLogin, platform, busy, surfaceGate, providerSettingsService, ucasGatewayService]);
+  }, [
+    owner,
+    allowLogin,
+    platform,
+    busy,
+    surfaceGate,
+    providerSettingsService,
+    ucasGatewayService,
+    operations,
+    projectView,
+  ]);
   const logout = useCallback(async () => {
     if (!owner || !allowLogin) return;
     actionGeneration.current++;
+    const ticket = errors.begin("logout");
     setShowUcasApiKeyPrompt(false);
     try {
       await owner.logout();
     } catch {
-      setOpen(true);
-      setError(true);
+      if (errors.isCurrent(ticket)) setOpen(true);
+      errors.fail(ticket);
       logger.warn("Enterprise logout failed");
     }
-  }, [owner, allowLogin]);
+  }, [owner, allowLogin, errors]);
   const organizations = view?.organizations ?? [];
   const selectedOrgId = view?.selectedOrgId ?? null;
-  const organizationLabel = useCallback(
-    (orgId: string) => {
-      const match = organizations.find((organization) => organization.id === orgId);
-      return match ? (match.label ?? match.id) : null;
-    },
-    [organizations],
-  );
   const selectOrganization = useCallback(
     async (orgId: string) => {
       if (!owner) return;
+      const ticket = errors.begin("selection");
       try {
         // 偏好失败保留旧公司，并向用户显示错误；不能让界面与实际扫码组织分裂。
         const candidate = enterpriseIdentityViewSchema.parse(await owner.selectOrganization(orgId));
-        useEnterpriseIdentityStore.getState().project(owner, candidate);
-        setError(false);
+        projectView(candidate);
+        errors.succeed(ticket);
       } catch {
-        setError(true);
+        errors.fail(ticket);
         logger.warn("Enterprise identity organization selection failed");
       }
     },
-    [owner],
+    [owner, errors, projectView],
   );
 
   return (
     <IdentityContext.Provider
       value={{
         view,
+        presentation,
         allowLogin,
         openLogin: () => {
-          setError(false);
+          errors.begin("clear");
           setOpen(true);
         },
         logout,
         organizations,
         selectedOrgId,
-        organizationLabel,
+        organizationLabel: (orgId) => {
+          const match = organizations.find((organization) => organization.id === orgId);
+          return match ? (match.label ?? match.id) : null;
+        },
         selectOrganization,
       }}
     >
@@ -404,12 +413,12 @@ export function EnterpriseIdentityProvider({
           waiting={busy || view?.status === "waiting"}
           organizations={organizations}
           selectedOrgId={selectedOrgId}
-          error={error || view?.error === "failed"}
+          error={errors.visible}
           expired={view?.error === "expired"}
           onLogin={() => void login()}
           onSelectOrg={(orgId) => void selectOrganization(orgId)}
-          onBackToOrganizations={backToOrganizations}
-          onSkip={skip}
+          onBackToOrganizations={() => cancelCurrentAttempt()}
+          onSkip={() => cancelCurrentAttempt(true)}
           onSurface={onSurface}
         />
       ) : null}

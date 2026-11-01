@@ -1,0 +1,20 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "strict": true,
+    "composite": false,
+    "incremental": false,
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "disableSourceOfProjectReferenceRedirect": true
+  },
+  "include": [
+    "test/enterpriseSkillManagement.test.ts",
+    "test/enterpriseSkillBodyPolicy.test.ts",
+    "test/fixtures/skillManagement.ts",
+    "src/skills/**/*.ts"
+  ],
+  "references": [{ "path": "../shared" }, { "path": "../rpc" }]
+}

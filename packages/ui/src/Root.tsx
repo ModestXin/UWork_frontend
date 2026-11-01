@@ -27,6 +27,7 @@ import {
   readV4ComposerDraft,
   V4_DRAFT_SCOPE_ROOT,
 } from "@/v4/composer/composerDraftStore.js";
+import { EnterpriseConsoleProvider } from "@/hooks/useEnterpriseConsole.js";
 import { useDynamicWorkflowAvailabilityLoader } from "@/hooks/useDynamicWorkflowAvailability.js";
 import { DirectoryBrowser } from "@/DirectoryBrowser.js";
 import { attachRemoteProjectWorkspace, resolveEntryProject } from "@/project-sidebar/index.js";
@@ -151,9 +152,13 @@ export function Root(props: RootProps) {
                             showOnStartup={!props.enterpriseIdentityReadOnly}
                             allowLogin={!props.enterpriseIdentityReadOnly}
                           >
-                            <RemoteConnectionProgressProvider>
-                              <RootInner {...props} />
-                            </RemoteConnectionProgressProvider>
+                            <EnterpriseConsoleProvider
+                              service={props.services.enterpriseConsoleService}
+                            >
+                              <RemoteConnectionProgressProvider>
+                                <RootInner {...props} />
+                              </RemoteConnectionProgressProvider>
+                            </EnterpriseConsoleProvider>
                           </EnterpriseIdentityProvider>
                         </CodingPlanUpgradeDialogProvider>
                       </AssistantCodeCommentFeatureProvider>

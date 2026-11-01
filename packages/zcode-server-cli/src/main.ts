@@ -29,4 +29,7 @@ void runServerCli(
   },
 ).then((exitCode) => {
   process.exitCode = exitCode;
+  // once("data") 完成确认后仍让 stdin 保持 flowing，终端未关闭时卸载/取消会挂起。
+  // 仅在原命令终态暂停输入，让进程自然退出，不强制截断其他待完成 IO。
+  process.stdin.pause();
 });

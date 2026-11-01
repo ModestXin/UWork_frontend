@@ -4,6 +4,7 @@ import { providerConfigDataSchema, zhipuAccountAccessDataSchema } from "./provid
 import { ModelConfig, ModelConfigRules } from "./model-config.js";
 import {
   ApiKeyAccessConfig,
+  EnterpriseSessionAccessConfig,
   ProviderApiConfig,
   ProviderConfig,
   ProviderConfigMap,
@@ -148,9 +149,11 @@ function createProviderConfig(config: z.infer<typeof providerConfigDataSchema>):
     access:
       config.access == null
         ? config.access
-        : config.access.type !== "zhipu-account"
-          ? new ApiKeyAccessConfig(config.access)
-          : new ZhipuAccountAccessConfig(config.access),
+        : config.access.type === "enterprise-session"
+          ? new EnterpriseSessionAccessConfig()
+          : config.access.type !== "zhipu-account"
+            ? new ApiKeyAccessConfig(config.access)
+            : new ZhipuAccountAccessConfig(config.access),
     api: config.api == null ? config.api : new ProviderApiConfig(config.api),
   });
 }

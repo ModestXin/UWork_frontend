@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { wecomIdentityConfigSchema, type WeComIdentityConfig } from "@zcode/shared";
 import { createWeComIdentityAdapter } from "./wecomIdentityAdapter.js";
+import { createUWorkIdentityAdapter } from "./uworkIdentityAdapter.js";
 import type { EnterpriseIdentityAdapter } from "./contract.js";
 
 /** 本机覆盖优先；新设备缺少本机文件时使用发布包公开配置。 */
@@ -34,5 +35,9 @@ export async function loadWeComIdentityAdapter(
   builtinPath?: string,
 ): Promise<EnterpriseIdentityAdapter | undefined> {
   const config = await loadWeComIdentityConfig(path, builtinPath);
-  return config ? createWeComIdentityAdapter(config, { fetchImpl }) : undefined;
+  return config
+    ? config.backend === "uwork"
+      ? createUWorkIdentityAdapter(config, fetchImpl)
+      : createWeComIdentityAdapter(config, { fetchImpl })
+    : undefined;
 }

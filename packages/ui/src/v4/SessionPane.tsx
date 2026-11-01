@@ -5,6 +5,8 @@ import {
   getRemoteConnectionFailureCode,
 } from "@/lib/remoteWorkspaceServiceError.js";
 import { buildConversationShareItems } from "@/v4/conversationShareItems.js";
+import { resolveConversationShareAccessMode } from "@/lib/conversationShareAccess.js";
+import { useEnterpriseIdentity } from "@/hooks/useEnterpriseIdentity.js";
 import { resolveSelectionSideInheritedModel } from "@/lib/selectionSideInheritedModel.js";
 import { useStartPlanRecommendation } from "@/hooks/useStartPlanRecommendation.js";
 import type { SessionCreateSource } from "@zcode/shared";
@@ -742,6 +744,7 @@ export function SessionPane({
     (snapshot?.sessionId === sessionId &&
       (!snapshot.runtimeInitialization || snapshot.runtimeInitialization.status === "ready"));
   const newlyCreatedSessionIdRef = useRef<string | null>(null);
+  const shareIdentityRevision = useEnterpriseIdentity()?.view?.revision ?? 0;
   const shareDraft = useConversationShareSelectionStore((storeState) =>
     sessionId ? storeState.drafts[sessionId] : undefined,
   );
@@ -862,13 +865,42 @@ export function SessionPane({
     logEpoch: string;
     capabilitiesFingerprint: string;
     supportedArtifactTypes: readonly ConversationShareAllowedArtifact[];
+    accessModes: readonly ConversationShareAccessMode[];
   }>({
     revision: 0,
     logEpoch: "",
     capabilitiesFingerprint: "",
     supportedArtifactTypes: [],
+    accessModes: [],
   });
   const [sharePreflightVersion, setSharePreflightVersion] = useState(0);
+  const shareAccessModes = sharePreflightMetaRef.current.accessModes;
+  const shareAccessMode = resolveConversationShareAccessMode(
+    shareDraft?.accessMode ?? DEFAULT_CONVERSATION_SHARE_ACCESS_MODE,
+    shareAccessModes,
+  );
+  useEffect(() => {
+    if (
+      !shareActive ||
+      !sessionId ||
+      !shareAccessMode ||
+      shareDraft?.accessMode === shareAccessMode
+    )
+      return;
+    setShareAccessMode(sessionId, shareAccessMode);
+    updateShareDockState(sessionId, {
+      disclosureAccepted: false,
+      attempt: null,
+      publishedShareUrl: null,
+    });
+  }, [
+    sessionId,
+    shareActive,
+    shareAccessMode,
+    shareDraft?.accessMode,
+    setShareAccessMode,
+    updateShareDockState,
+  ]);
   const selectedShareTurnFingerprints = useMemo(
     () =>
       new Map(
@@ -915,7 +947,7 @@ export function SessionPane({
   // 传输类失败会被按 turn 缓存成阻断项，仅靠选择变化无法再次触发 RPC；
   // 重试 token 变化时清缓存并重新发起，避免一次网络抖动把用户卡死在选择阶段。
   const [sharePreflightRetryToken, setSharePreflightRetryToken] = useState(0);
-  const sharePreflightScopeKey = `${workspaceIdentity?.trim() || workspacePath}\u0000${remoteSessionId ?? ""}\u0000${sessionId ?? ""}`;
+  const sharePreflightScopeKey = `${workspaceIdentity?.trim() || workspacePath}\u0000${remoteSessionId ?? ""}\u0000${sessionId ?? ""}\u0000${shareIdentityRevision}`;
   const sharePreflightScopeKeyRef = useRef<string | null>(null);
   const sharePreflightCacheKey = useCallback(
     (productTurnId: string) =>
@@ -974,15 +1006,23 @@ export function SessionPane({
   useEffect(() => {
     if (sharePreflightScopeKeyRef.current === sharePreflightScopeKey) return;
     sharePreflightScopeKeyRef.current = sharePreflightScopeKey;
+    if (sessionId)
+      updateShareDockState(sessionId, {
+        disclosureAccepted: false,
+        attempt: null,
+        publishedShareUrl: null,
+        publishing: false,
+      });
     sharePreflightCacheRef.current.clear();
     sharePreflightMetaRef.current = {
       revision: 0,
       logEpoch: "",
       capabilitiesFingerprint: "",
       supportedArtifactTypes: [],
+      accessModes: [],
     };
     setSharePreflightVersion((version) => version + 1);
-  }, [sharePreflightScopeKey]);
+  }, [sharePreflightScopeKey, sessionId, updateShareDockState]);
 
   useEffect(() => {
     if (shareActive && sessionId) return;
@@ -992,6 +1032,7 @@ export function SessionPane({
       logEpoch: "",
       capabilitiesFingerprint: "",
       supportedArtifactTypes: [],
+      accessModes: [],
     };
     setSharePreflightVersion((version) => version + 1);
   }, [sessionId, shareActive]);
@@ -5051,7 +5092,16 @@ export function SessionPane({
   ]);
 
   const handleConfirmShareDisclosure = useCallback(async () => {
-    if (!sessionId || !shareDraft || sharePublishing) return;
+    if (
+      !sessionId ||
+      !shareDraft ||
+      sharePublishing ||
+      !shareAccessMode ||
+      shareDraft.accessMode !== shareAccessMode
+    )
+      return;
+    const requestScopeKey = sharePreflightScopeKey;
+    const isCurrentShare = () => requestScopeKey === sharePreflightScopeKeyRef.current;
     const productTurnIds = getConversationShareSelectedProductTurnIds(
       useConversationShareSelectionStore.getState(),
       sessionId,
@@ -5059,7 +5109,7 @@ export function SessionPane({
     if (productTurnIds.length === 0 || !shareTitle.trim()) return;
     const attemptKey = JSON.stringify({
       title: shareTitle.trim(),
-      accessMode: shareDraft.accessMode,
+      accessMode: shareAccessMode,
       productTurnIds,
       revision: snapshot?.revision ?? null,
       logEpoch: snapshot?.logEpoch ?? null,
@@ -5077,6 +5127,7 @@ export function SessionPane({
     const progressSubscription = conversationShareService.onDynamicPublishProgress(operationId)((
       progress,
     ) => {
+      if (!isCurrentShare()) return;
       activePhase = progress.phase;
       updateShareDockState(sessionId, {
         progress: progress.phase === "complete" ? "checking" : progress.phase,
@@ -5112,7 +5163,7 @@ export function SessionPane({
           ...(remoteSessionId ? { remoteSessionId } : {}),
           sessionId,
           title: shareTitle.trim(),
-          accessMode: shareDraft.accessMode,
+          accessMode: shareAccessMode,
           selection: { kind: "productTurns", productTurnIds },
           clientRequestId: shareAttempt.clientRequestId,
           disclosureAcceptedAt: shareAttempt.disclosureAcceptedAt,
@@ -5120,6 +5171,7 @@ export function SessionPane({
         },
         operationId,
       );
+      if (!isCurrentShare()) return;
       const warnings = collectedWarnings as ConversationShareDisplayWarnings | null;
       updateShareDockState(sessionId, {
         publishedShareUrl: share.share_url,
@@ -5138,6 +5190,7 @@ export function SessionPane({
         toast(intl.formatMessage({ id: "conversationShare.publishSucceeded" }));
       }
     } catch (error) {
+      if (!isCurrentShare()) return;
       const details = getConversationShareErrorDetails(error);
       // 401 等传输错误通常没有服务端 issues，不能再降级成 collecting 阶段的通用文案。
       const resolvedMessageId = resolveConversationSharePublishErrorMessageId(error);
@@ -5180,7 +5233,7 @@ export function SessionPane({
         sessionId,
         operationId,
         phase: activePhase,
-        accessMode: shareDraft.accessMode,
+        accessMode: shareAccessMode,
         selectedProductTurnCount: productTurnIds.length,
         remoteWorkspace: Boolean(workspaceIdentity || remoteSessionId),
         errorName: details.name,
@@ -5194,7 +5247,7 @@ export function SessionPane({
       });
     } finally {
       progressSubscription.dispose();
-      updateShareDockState(sessionId, { publishing: false });
+      if (isCurrentShare()) updateShareDockState(sessionId, { publishing: false });
     }
   }, [
     conversationShareService,
@@ -5202,6 +5255,8 @@ export function SessionPane({
     remoteSessionId,
     sessionId,
     shareDraft,
+    shareAccessMode,
+    sharePreflightScopeKey,
     sharePublishing,
     shareTitle,
     snapshot?.logEpoch,
@@ -5283,7 +5338,7 @@ export function SessionPane({
 
   const handleShareAccessModeChange = useCallback(
     (accessMode: ConversationShareAccessMode) => {
-      if (!sessionId) return;
+      if (!sessionId || !shareAccessModes.includes(accessMode)) return;
       setShareAccessMode(sessionId, accessMode);
       updateShareDockState(sessionId, {
         disclosureAccepted: false,
@@ -5292,7 +5347,7 @@ export function SessionPane({
         warnings: null,
       });
     },
-    [sessionId, setShareAccessMode, updateShareDockState],
+    [sessionId, shareAccessModes, setShareAccessMode, updateShareDockState],
   );
 
   // 内联回调会让 memo 确认 Dock 每次重渲染；依赖当前 session，避免切换后写回旧会话。
@@ -5532,7 +5587,8 @@ export function SessionPane({
         selectedCount={selectedShareProductTurnIds.length}
         totalCount={eligibleShareProductTurnIds.length}
         title={shareTitle}
-        accessMode={shareDraft?.accessMode ?? DEFAULT_CONVERSATION_SHARE_ACCESS_MODE}
+        accessMode={shareAccessMode}
+        availableAccessModes={shareAccessModes}
         progressLabel={intl.formatMessage({
           id:
             shareProgress === "uploading"
@@ -5553,7 +5609,7 @@ export function SessionPane({
         onDeselectTurn={handleDeselectShareTurn}
         onTitleChange={handleShareTitleChange}
         onAccessModeChange={handleShareAccessModeChange}
-        disclosureAccepted={shareDisclosureAccepted}
+        disclosureAccepted={shareDisclosureAccepted && shareDraft?.accessMode === shareAccessMode}
         onDisclosureAcceptedChange={handleShareDisclosureAcceptedChange}
         onCancel={handleShareCancel}
         onEditSelection={handleEditShareSelection}

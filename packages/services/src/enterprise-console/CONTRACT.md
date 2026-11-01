@@ -1,0 +1,3 @@
+# Enterprise console
+
+The backend owns published menu admission and independent enterprise-Agent/asset/run permissions. This stateless Host uses the existing private session and exposes only bounded credential-free projections. Managed menu dispatch authorizes the current legacy wire ID before calling existing UWork route/task owners: agents maps to Automation and assets maps to Plugin Store. Opening these menus never fetches Agent/asset/run APIs. Compatibility business methods independently consume backend channel/seat/subscription/IP/resource/caller checks, recheck identity, preserve accepted stop receipts and never retry mutations. The service owns no identity, route, accepted run queue or persistent business state.

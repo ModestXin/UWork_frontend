@@ -4,7 +4,6 @@ import {
   ZCODE_ENV,
   ZCODE_VERSION,
   type IPlatformService,
-  type RendererActionTraceConfigV1,
 } from "@zcode/shared";
 import { RendererUserActionTelemetry, setUserActionTelemetry } from "@zcode/ui";
 
@@ -32,13 +31,19 @@ export function initializeDesktopUserActionTrace(options: {
   });
   setUserActionTelemetry(telemetry);
 
-  const applyConfig = (config: RendererActionTraceConfigV1) => telemetry.updateConfig(config);
+  let pushed = 0;
+  const disposeConfigListener = options.platform.onRendererActionTraceConfigChanged?.((config) => {
+    pushed++;
+    telemetry.updateConfig(config);
+  });
+  const captured = pushed;
   void getConfig()
-    .then(applyConfig)
+    .then((config) => {
+      if (captured === pushed) telemetry.updateConfig(config);
+    })
     .catch(() => {
-      telemetry.updateConfig(DISABLED_RENDERER_ACTION_TRACE_CONFIG);
+      if (captured === pushed) telemetry.updateConfig(DISABLED_RENDERER_ACTION_TRACE_CONFIG);
     });
-  const disposeConfigListener = options.platform.onRendererActionTraceConfigChanged?.(applyConfig);
   const handlePageHide = () => {
     void telemetry.shutdown();
   };

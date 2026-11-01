@@ -4,6 +4,7 @@ import {
   parseClientConfigSnapshot,
   type ApiClient,
   type ClientConfigSnapshot,
+  type UWorkClientPresentation,
 } from "@zcode/shared";
 import type { IClientConfigService } from "./clientConfig.js";
 
@@ -26,8 +27,27 @@ interface CacheEntry {
 export function createClientConfigService(dependencies: {
   apiClient: ApiClient;
   resolveRequestContext: () => RequestContext | Promise<RequestContext>;
+  /**
+   * 企业托管时用已发布的插件商店排序覆盖公开配置；未托管/未发布时保持公开配置，
+   * 读取失败也不能让公开配置整体不可用。
+   */
+  readClientPresentation?: () => Promise<UWorkClientPresentation>;
 }): IClientConfigService {
   const entries = new Map<string, CacheEntry>();
+
+  async function withManagedOverlay(snapshot: ClientConfigSnapshot): Promise<ClientConfigSnapshot> {
+    if (!dependencies.readClientPresentation) return snapshot;
+    try {
+      const view = await dependencies.readClientPresentation();
+      if (view.status !== "ready" || view.pluginStore.status !== "ready") return snapshot;
+      return {
+        ...snapshot,
+        pluginStoreOrder: structuredClone(view.pluginStore.data.order),
+      };
+    } catch {
+      return snapshot;
+    }
+  }
 
   async function fetchSnapshot(url: URL): Promise<ClientConfigSnapshot> {
     const controller = new AbortController();
@@ -76,7 +96,7 @@ export function createClientConfigService(dependencies: {
       const entry = entries.get(key) ?? { expiresAt: 0 };
       entries.set(key, entry);
       if (!forceRefresh && entry.snapshot && entry.expiresAt > Date.now()) {
-        return structuredClone(entry.snapshot);
+        return withManagedOverlay(structuredClone(entry.snapshot));
       }
       if (!entry.pending) {
         entry.pending = fetchSnapshot(url)
@@ -89,7 +109,7 @@ export function createClientConfigService(dependencies: {
             entry.pending = undefined;
           });
       }
-      return structuredClone(await entry.pending);
+      return withManagedOverlay(structuredClone(await entry.pending));
     },
   };
 }

@@ -125,6 +125,45 @@ test("seeding resolves the gateway endpoint override over the bundled default", 
   );
 });
 
+test("trusted session provisioning atomically updates endpoint and removes a legacy device key", async () => {
+  const { service, repository } = setup();
+  await seed(service);
+  await service.applyUcasGatewayConfig({
+    baseUrl: "https://old.example.test/v1",
+    apiKey: "synthetic-old-device",
+  });
+  const session = await service.applyUcasGatewayConfig({
+    baseUrl: "https://new.example.test/v1",
+    authMode: "enterprise-session",
+  });
+  const rule = ucasRule(session.snapshot);
+  assert.equal(session.apiKeyApplied, false);
+  assert.equal(rule.config.api?.baseUrl, "https://new.example.test/v1");
+  assert.deepEqual(rule.config.access?.toJSON(), { type: "enterprise-session" });
+  assert.equal(
+    JSON.stringify((await repository.read()).providers.toJSON()).includes("synthetic-old-device"),
+    false,
+  );
+  const repeated = await service.applyUcasGatewayConfig({
+    baseUrl: "https://new.example.test/v1",
+    authMode: "enterprise-session",
+  });
+  assert.deepEqual(ucasRule(repeated.snapshot).config.access?.toJSON(), {
+    type: "enterprise-session",
+  });
+  await seed(service);
+  assert.deepEqual(ucasRule(await repository.read()).config.access?.toJSON(), {
+    type: "enterprise-session",
+  });
+  assert.throws(() =>
+    service.applyUcasGatewayConfig({
+      baseUrl: "https://new.example.test/v1",
+      authMode: "enterprise-session",
+      apiKey: "forged",
+    }),
+  );
+});
+
 test("gateway writing fills a missing key and keeps an existing one until replaced", async () => {
   const { service } = setup("http://llm.internal.example:14000");
   await seed(service);

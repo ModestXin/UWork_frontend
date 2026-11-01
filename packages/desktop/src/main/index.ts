@@ -15,10 +15,8 @@ import {
 import armsRum from "@arms/rum-electron";
 import { createArmsUserIdentitySync } from "./armsUserIdentity.js";
 import { ensureDesktopDeviceMidSync } from "./desktopDeviceMid.js";
-import {
-  createDesktopContextPromptRollout,
-  createElectronDesktopContextPromptConfigFetcher,
-} from "./desktopContextPromptRollout.js";
+import { createClientPresentationBindings } from "./clientPresentationBindings.js";
+import { openBoundClientHelp } from "./clientPresentationHelp.js";
 import { buildBrowserViewCloseTabNotification } from "./browserView/browserCloseTabNotification.js";
 import { BrowserGuestManager } from "./browserView/browserGuestManager.js";
 import { createElectronBrowserWebmRecorder } from "./browserView/electronBrowserWebmRecorder.js";
@@ -90,6 +88,11 @@ import {
   InternalChannels,
 } from "@zcode/shared";
 import { logger } from "./logger.js";
+import {
+  elapsedSingleInstanceStartupMs,
+  readSingleInstanceStartupTime,
+  recordSingleInstanceStartupPhase,
+} from "./desktopSingleInstanceStartupLog.js";
 import { markMainLaunchAppReady } from "./desktopLaunchMarks.js";
 import { createCuaPipFocusRouter, resolveCuaPipWindowKey } from "./cuaPipFocusRouter.js";
 import { createDesktopTelemetryFetch } from "./desktopTelemetryFetch.js";
@@ -114,6 +117,11 @@ import { createRendererActionTraceBroker } from "./rendererActionTraceBroker.js"
 import { createRendererActionTraceExporter } from "./rendererActionTraceExporter.js";
 import { registerRendererActionTraceIpc } from "./rendererActionTraceIpc.js";
 import { createRendererActionTraceRollout } from "./rendererActionTraceRollout.js";
+import {
+  createDesktopContextPromptRollout,
+  createElectronDesktopContextPromptConfigFetcher,
+} from "./desktopContextPromptRollout.js";
+import { createDesktopHelpConfigReader } from "./desktopHelpConfig.js";
 import {
   resolveAppShutdownPolicy,
   selectAppShutdownPolicy,
@@ -186,7 +194,7 @@ import {
   registerDeepLinkProtocol,
   resolveExternalWorkspaceOpenDialogCopy,
 } from "./desktopOAuthDeepLink.js";
-import { handleSecondInstanceWorkspaceRequest } from "./desktopSecondInstanceDeepLink.js";
+import { dispatchSecondInstanceWorkspaceRequest } from "./desktopSecondInstanceDeepLink.js";
 import { installFinderOpenFolderWorkflow } from "./desktopFinderOpenFolderWorkflow.js";
 import { installWindowsOpenFolderContextMenu } from "./desktopWindowsOpenFolderContextMenu.js";
 import {
@@ -207,7 +215,6 @@ import {
   listRegisteredHostAgentProcessIds,
   setBrowserUseGuestWebContentsIdsProvider,
 } from "./resourceManagerWindow.js";
-import { createDesktopHelpConfigReader } from "./desktopHelpConfig.js";
 import { registerPlatformIpcHandlers } from "./desktopMainIpcPlatform.js";
 import { registerRemoteIpcHandlers } from "./desktopMainIpcRemote.js";
 import {
@@ -604,9 +611,8 @@ function createRuntimeProcessEnvPreparation(): RuntimeProcessEnvPreparation {
   return { patchPromise, fallbackPatch };
 }
 
-// 首窗在 Main import 时就开始采集；后续窗口各自刷新，避免永久复用进程启动时的 shell snapshot。
-let initialRuntimeProcessEnvPreparation: RuntimeProcessEnvPreparation | null =
-  createRuntimeProcessEnvPreparation();
+// 首窗仅由持锁 Main 预热；拒锁副实例不能留下由自身 AbortController 管理的独立 shell 进程组。
+let initialRuntimeProcessEnvPreparation: RuntimeProcessEnvPreparation | null = null;
 function takeRuntimeProcessEnvPreparation(): RuntimeProcessEnvPreparation {
   const initialPreparation = initialRuntimeProcessEnvPreparation;
   if (initialPreparation) {
@@ -623,6 +629,18 @@ const windowWorkspaceMap = new Map<number, Set<string>>();
 const windowTaskRealtimeHostIdMap = new Map<number, string>();
 const windowUnreadCountMap = new Map<number, number>();
 const windowHostProcessMap = new Map<number, ElectronUtilityProcess>();
+let rendererActionTraceIpc: ReturnType<typeof registerRendererActionTraceIpc> | undefined;
+const clientPresentationBindings = createClientPresentationBindings({
+  currentChild: (senderId) => windowHostProcessMap.get(senderId),
+  changed: (senderId, bound) => {
+    rendererActionTraceIpc?.publish(senderId, bound);
+    // 在当前同步 invalidation/exit 清理结束后再读取，不能复用刚被退休的 pending。
+    if (bound.projection.status === "unavailable")
+      queueMicrotask(() => {
+        void rendererActionTraceIpc?.refresh(senderId).catch(() => {});
+      });
+  },
+});
 const cuaPipFocusRouter = createCuaPipFocusRouter({
   send: (windowId, event) => {
     windowHostProcessMap.get(windowId)?.postMessage({
@@ -684,52 +702,8 @@ async function resolveCurrentZCodeEndpointOrigin() {
     overrideOrigin: (await mainSettingService.get()).zcodeEndpointOrigin,
   });
 }
+// desktop context prompt 灰度快照；实体在 deviceMid 就绪后创建，Host 接线读取此引用。
 let desktopContextPromptRollout: ReturnType<typeof createDesktopContextPromptRollout> | undefined;
-function resolveDesktopContextPromptEnabledForHost(): boolean {
-  const rollout = desktopContextPromptRollout;
-  if (!rollout) {
-    return false;
-  }
-  // Host 创建时顺便触发过期刷新，但只读取当前快照；网络请求不能阻塞 Local/Remote Host。
-  void rollout.refresh();
-  return rollout.getSnapshot().enabled;
-}
-
-// 首个 Host 创建前的有界灰度裁决门。Host/Agent 的 presentation surface 在进程启动时
-// 冻结（services/node.ts 顶层 const + CLI --surface），而灰度请求是旁路、不阻塞 Host。若首个
-// Host fork 早于请求 resolve，成功结果（enabled:true）对已冻结的 Host/Agent 无可达生效路径。
-// 这里给"成功结果"一条有界的生效路径：首 Host fork 前 await 一次裁决（≤2s），失败/超时仍按当前
-// 快照继续（desktopContextPrompt fail-open）。first-only 永久
-// latch——后续 Host fork await 已 resolve 的 promise（近乎 0ms），且各 resolve*ForHost()
-// 同步读取已被刷新的 live 快照。
-const DESKTOP_FIRST_HOST_SPAWN_DECISION_TIMEOUT_MS = 2_000;
-let firstHostSpawnDecisionPromise: Promise<void> | null = null;
-function awaitFirstHostSpawnDecision(): Promise<void> {
-  if (firstHostSpawnDecisionPromise) {
-    return firstHostSpawnDecisionPromise;
-  }
-  firstHostSpawnDecisionPromise = (async () => {
-    const rollout = desktopContextPromptRollout;
-    if (!rollout) {
-      return;
-    }
-    try {
-      const decision = await rollout.awaitFirstDecision(
-        DESKTOP_FIRST_HOST_SPAWN_DECISION_TIMEOUT_MS,
-      );
-      logger.info("[desktop-context-prompt] first host spawn decision resolved", {
-        enabled: decision.enabled,
-        configVersion: decision.configVersion,
-      });
-    } catch (error) {
-      // awaitFirstDecision 永不 reject（refresh 内部已 catch + timeout 回退快照），此处仅兜底。
-      logger.warn("[desktop-context-prompt] first host spawn decision failed, fail-open", {
-        error,
-      });
-    }
-  })();
-  return firstHostSpawnDecisionPromise;
-}
 const appTelemetryCore = createTelemetryCore({
   loadUserId: createTelemetryUserIdLoader(appTelemetryCredentialService),
   loadAuthorization: createTelemetryAuthorizationLoader(appTelemetryCredentialService),
@@ -834,7 +808,6 @@ const rendererActionTraceBroker = createRendererActionTraceBroker({
   }),
   logger,
 });
-let disposeRendererActionTraceIpc: (() => void) | undefined;
 const armsUserIdentitySync = createArmsUserIdentitySync({
   deviceMid,
   setUser: (user) => armsRum.setConfig("user", user),
@@ -862,8 +835,11 @@ let startupOpenWorkspaceRequest: ExplicitStartupWorkspaceRequest | null =
       ? { path: startupDeepLinkWorkspacePath, source: "deep-link" }
       : null;
 
-
 let forceUpdateMainWindowCreationBlocked = false;
+
+function canHandleExternalWorkspaceRequests() {
+  return !appQuitPreparationInFlight && !hasPreparedAppQuit;
+}
 
 function resolveExternalWorkspaceConfirmationCopy() {
   const effectiveLocale =
@@ -875,17 +851,18 @@ function resolveExternalWorkspaceConfirmationCopy() {
 
 const primaryWindowCoordinator = createPrimaryWindowCoordinator({
   listWindows: getApplicationWindowsExcludingCuaIndicator,
-  resolveStartupWindowBootstrap: () => {
+  resolveStartupWindowBootstrap: async () => {
     if (startupOpenWorkspaceRequest) {
       const request = startupOpenWorkspaceRequest;
       startupOpenWorkspaceRequest = null;
       startupDeepLinkConsumptionGate.markStartupRequestConsumed(request);
-      const explicitBootstrap = resolveExplicitStartupWorkspaceBootstrap(request, {
+      const explicitBootstrap = await resolveExplicitStartupWorkspaceBootstrap(request, {
         confirmationCopy: resolveExternalWorkspaceConfirmationCopy(),
+        isRequestActive: canHandleExternalWorkspaceRequests,
         logger,
       });
       if (explicitBootstrap) {
-        return Promise.resolve(explicitBootstrap);
+        return explicitBootstrap;
       }
     }
 
@@ -897,6 +874,7 @@ const primaryWindowCoordinator = createPrimaryWindowCoordinator({
     });
   },
   createWindow: (startupBootstrap) => {
+    if (!canHandleExternalWorkspaceRequests()) return;
     createWindowInstance(startupBootstrap);
   },
   logger,
@@ -1008,8 +986,9 @@ async function prepareAppQuit(reason: string, kind: AppShutdownKind = "normal"):
   stopDesktopZCodeDataSizeTelemetry();
   stopDesktopNetworkTelemetry();
   stopRemoteUsageArmsPeriodicSampling();
-  disposeRendererActionTraceIpc?.();
-  disposeRendererActionTraceIpc = undefined;
+  rendererActionTraceIpc?.dispose();
+  rendererActionTraceIpc = undefined;
+  clientPresentationBindings.dispose();
   notifyStabilityAppExit(
     getStabilityLifecycleScene() === "update_install" ? "update_install" : "app_quit",
     logger,
@@ -1335,7 +1314,21 @@ async function executeDesktopCommandForApp(
   senderWindow?: BrowserWindow | null,
 ) {
   return executeDesktopCommand({
-    fetchHelpConfig: readHelpConfig,
+    fetchHelpConfig: async () => undefined,
+    openClientHelp: async (kind, target, locale) => {
+      if (!target || target.isDestroyed()) return true;
+      return openBoundClientHelp({
+        senderId: target.webContents.id,
+        kind,
+        locale,
+        read: clientPresentationBindings.read,
+        isCurrent: (senderId, epoch) =>
+          !target.isDestroyed() &&
+          !target.webContents.isDestroyed() &&
+          clientPresentationBindings.isCurrent(senderId, epoch),
+        open: (url) => shell.openExternal(url),
+      });
+    },
     command,
     senderWindow,
     logger,
@@ -1689,7 +1682,6 @@ function createWindowInstance(startupBootstrap: StartupWindowBootstrap = {}) {
       }),
     windowHostProcessMap,
     onHostProcessReady: (windowKey) => cuaPipFocusRouter.refreshWindow(windowKey),
-    awaitFirstHostSpawnDecision,
     spawnHostProcess: (win, label, initMessage) =>
       spawnHostProcess(
         win,
@@ -1707,11 +1699,14 @@ function createWindowInstance(startupBootstrap: StartupWindowBootstrap = {}) {
         },
         {
           hostProcessLocalEnv,
-          desktopContextPromptEnabled: resolveDesktopContextPromptEnabledForHost,
           logger,
           broadcastHub,
           taskRealtimeBus,
           windowHostProcessMap,
+          onClientPresentationMessage: (senderId, child, message) =>
+            clientPresentationBindings.receive(senderId, child, message),
+          onClientPresentationSourceExited: (child) =>
+            clientPresentationBindings.forgetChild(child),
           hostRunningTaskCountMap,
           onCuaOperationStateChanged: (source, event) =>
             windowsCuaOperationIndicator.handleState(source, event),
@@ -1814,19 +1809,45 @@ app.on("open-url", (event, url) => {
   }
   handleDeepLink(url, logger, {
     confirmationCopy: resolveExternalWorkspaceConfirmationCopy(),
+    isRequestActive: canHandleExternalWorkspaceRequests,
     resolveApplicationWindow: () => getApplicationWindowsExcludingCuaIndicator()[0] ?? null,
   });
 });
-const gotTheLock = app.hasSingleInstanceLock() || app.requestSingleInstanceLock(createDeepLinkSingleInstanceData(process.argv));
+recordSingleInstanceStartupPhase(logger, { phase: "lock-request-start" });
+const lockRequestStartedAt = readSingleInstanceStartupTime();
+// 已持锁的进程（如 macOS 复用实例）不再重复请求，避免二次申请把启动日志记成未获得锁。
+const gotTheLock =
+  app.hasSingleInstanceLock() ||
+  app.requestSingleInstanceLock(createDeepLinkSingleInstanceData(process.argv));
+recordSingleInstanceStartupPhase(logger, {
+  phase: "lock-request-return",
+  acquired: gotTheLock,
+  elapsedMs: elapsedSingleInstanceStartupMs(lockRequestStartedAt),
+});
 if (!gotTheLock) {
-  app.quit();
+  recordSingleInstanceStartupPhase(logger, { phase: "secondary-quit-start" });
+  const secondaryQuitStartedAt = readSingleInstanceStartupTime();
+  // 拒锁进程不拥有窗口/Host/任务；使用即时退出，避免走尚在启动中的普通用户退出流程。
+  app.exit(0);
+  recordSingleInstanceStartupPhase(logger, {
+    phase: "secondary-quit-return",
+    elapsedMs: elapsedSingleInstanceStartupMs(secondaryQuitStartedAt),
+  });
+}
+if (gotTheLock) {
+  initialRuntimeProcessEnvPreparation = createRuntimeProcessEnvPreparation();
 }
 app.on("second-instance", (_event, argv, _workingDirectory, additionalData) => {
-  if (
-    handleSecondInstanceWorkspaceRequest({
+  dispatchSecondInstanceWorkspaceRequest(
+    {
       additionalData,
       argv,
-      handleDeepLink: (url, options) => handleDeepLink(url, logger, options),
+      isRequestActive: canHandleExternalWorkspaceRequests,
+      handleDeepLink: (url, options) =>
+        handleDeepLink(url, logger, {
+          ...options,
+          isRequestActive: canHandleExternalWorkspaceRequests,
+        }),
       handleOpenWorkspacePath: (path, options) =>
         handleOpenWorkspacePath(path, logger, {
           allowWithoutReadyWindow: true,
@@ -1837,24 +1858,25 @@ app.on("second-instance", (_event, argv, _workingDirectory, additionalData) => {
         }),
       resolveApplicationWindow: () => getApplicationWindowsExcludingCuaIndicator()[0] ?? null,
       workspaceConfirmationCopy: resolveExternalWorkspaceConfirmationCopy(),
-    })
-  ) {
-    return;
-  }
-
-  const win = getApplicationWindowsExcludingCuaIndicator()[0];
-  if (win) {
-    if (win.isMinimized()) {
-      win.restore();
-    }
-    if (!win.isVisible()) {
-      win.show();
-    }
-    win.focus();
-  }
+    },
+    () => {
+      const win = getApplicationWindowsExcludingCuaIndicator()[0];
+      if (win) {
+        if (win.isMinimized()) {
+          win.restore();
+        }
+        if (!win.isVisible()) {
+          win.show();
+        }
+        win.focus();
+      }
+    },
+  );
 });
 
 app.whenReady().then(async () => {
+  // 即使退出边界意外返回，未持单实例锁的进程也不能再次创建窗口/Host/Agent。
+  if (!gotTheLock) return;
   markMainLaunchAppReady();
   installRequestSecurityDiagnostics(session.defaultSession.webRequest, logger);
   installLocalMediaPreviewProtocol(session.defaultSession.protocol, {
@@ -2085,7 +2107,19 @@ app.whenReady().then(async () => {
   }
 
   registerPlatformIpcHandlers({
-    fetchHelpConfig: readHelpConfig,
+    fetchHelpConfig: async () => undefined,
+    canOpenClientCommunity: async (senderId, locale) => {
+      const bound = await clientPresentationBindings.read(senderId);
+      const sender = webContents.fromId(senderId);
+      if (!sender || sender.isDestroyed()) return false;
+      if (!clientPresentationBindings.isCurrent(senderId, bound.bindingEpoch)) return false;
+      if (bound.projection.status === "unmanaged") return undefined;
+      return (
+        bound.projection.status === "ready" &&
+        bound.projection.help.status === "ready" &&
+        bound.projection.help.data.communityUrls[locale] !== null
+      );
+    },
     logger,
     // CDP-on-guest pivot：renderer `<webview>` dom-ready 上报 guest webContentsId → attach。
     attachBrowserGuest: (key, webContentsId, options) => {
@@ -2205,8 +2239,8 @@ app.whenReady().then(async () => {
     deviceMid,
   });
 
-  disposeRendererActionTraceIpc = registerRendererActionTraceIpc({
-    rollout: rendererActionTraceRollout,
+  rendererActionTraceIpc = registerRendererActionTraceIpc({
+    presentation: clientPresentationBindings,
     broker: rendererActionTraceBroker,
     env: process.env,
     logger,
@@ -2338,6 +2372,7 @@ app.whenReady().then(async () => {
   if (protocolUrl && startupDeepLinkConsumptionGate.shouldHandleReadyProtocolUrl(protocolUrl)) {
     handleDeepLink(protocolUrl, logger, {
       confirmationCopy: resolveExternalWorkspaceConfirmationCopy(),
+      isRequestActive: canHandleExternalWorkspaceRequests,
       resolveApplicationWindow: () => getApplicationWindowsExcludingCuaIndicator()[0] ?? null,
     });
   }

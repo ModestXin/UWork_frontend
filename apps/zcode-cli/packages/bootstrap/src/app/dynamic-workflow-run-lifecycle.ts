@@ -48,6 +48,7 @@ interface RunServiceLifecycle {
   close(): Promise<void>;
   /** 关闭之后的 launch 是接线错误：抛，而不是给 contracts 的拒绝枚举加成员。 */
   assertOpen(): void;
+  signal: AbortSignal;
   /** 活条目下出现终态行 ⇒ 外来写入，每个条目记一条 warn。 */
   noteForeignTerminalRow(runId: string): void;
 }
@@ -150,13 +151,13 @@ export function createRunServiceLifecycle(deps: RunServiceLifecycleDeps): RunSer
     return settlement;
   };
 
-  let closed = false;
+  const lifetime = new AbortController();
   let closePromise: Promise<void> | undefined;
   const close = (): Promise<void> => {
     // 幂等 + **同步**置位：`closed` 必须在本同步片就为真，否则关闭期间到达的一次 launch
     // 会溜进来，造出一个没人拥有的引擎。
     closePromise ??= (async () => {
-      closed = true;
+      lifetime.abort("interrupted");
       const live = [...deps.runs.values()].filter((entry) => entry.terminal === undefined);
       deps.logger?.info?.("Dynamic workflow run service closing", {
         event: "dynamic_workflow.service.closing",
@@ -182,7 +183,7 @@ export function createRunServiceLifecycle(deps: RunServiceLifecycleDeps): RunSer
    * 都要处理一个正常运行中永不出现的分支。
    */
   const assertOpen = (): void => {
-    if (closed) {
+    if (lifetime.signal.aborted) {
       throw new Error(
         "dynamic workflow run service is closed; a launch after App close is a wiring fault",
       );
@@ -221,6 +222,7 @@ export function createRunServiceLifecycle(deps: RunServiceLifecycleDeps): RunSer
     trackSettlement,
     close,
     assertOpen,
+    signal: lifetime.signal,
     noteForeignTerminalRow,
   };
 }

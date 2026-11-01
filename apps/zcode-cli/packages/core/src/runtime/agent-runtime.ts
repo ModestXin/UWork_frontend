@@ -175,6 +175,7 @@ export class AgentRuntime {
   private modelFactory: AgentRuntimeDeps["modelFactory"];
   private modelIoDir?: string;
   private providerRuntimeHeadersPort?: AgentRuntimeDeps["providerRuntimeHeadersPort"];
+  private turnPresentationPort?: AgentRuntimeDeps["turnPresentationPort"];
   private browserControlPort?: AgentRuntimeDeps["browserControlPort"];
   /** 模型请求准入端口；随每次模型请求进调用上下文。 */
   private modelRequestAdmission?: AgentRuntimeDeps["modelRequestAdmission"];
@@ -321,6 +322,7 @@ export class AgentRuntime {
     this.modelFactory = deps.modelFactory;
     this.modelIoDir = deps.modelIoDir;
     this.providerRuntimeHeadersPort = deps.providerRuntimeHeadersPort;
+    this.turnPresentationPort = deps.turnPresentationPort;
     this.browserControlPort = deps.browserControlPort;
     this.modelRequestAdmission = deps.modelRequestAdmission;
     configureOffPeakRuntime(
@@ -583,6 +585,10 @@ export interface AgentRuntime {
    * **必须**经这里取这两个端口，不能自行从 appOptions 取——理由见 `methods/config.ts` 的实现注释。
    */
   createChildClientPorts(context: ChildClientPortsContext): ClientFacingPorts;
+  createWorkflowAdmission(input?: {
+    traceContext?: TraceContext;
+    signal?: AbortSignal;
+  }): Promise<import("@zcode/contracts").WorkflowExecutionAdmission>;
   getContextBuilder(): ContextBuilder;
   /** Composer 使用的 Session Skill 快照；同一 runtime 冻结，runtime 重建后重新发现。 */
   getSkillCatalog(traceContext: TraceContext): Promise<SkillLoadOutcome>;

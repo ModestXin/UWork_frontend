@@ -83,6 +83,7 @@ export {
 } from "./env.js";
 export * from "./errors.js";
 export * from "./rendererActionTrace.js";
+export * from "./uwork-client-experience.js";
 export * from "./validation.js";
 export * from "./api.js";
 export * from "./zcode-protocol/index.js";
@@ -354,6 +355,7 @@ export * from "./rewardsBridge.js";
 export * from "./session-debug.js";
 export { redactFeedbackText } from "./feedbackPrivacy.js";
 export * from "./enterprise-identity.js";
+export * from "./enterprise-assets.js";
 export * from "./wecom-identity-config.js";
 export * from "./ucas-gateway.js";
 export * from "./im.js";
@@ -381,3 +383,6 @@ export {
 export * from "./request-security-edition/verification-policy.js";
 
 export * from "./conversation-share-tool-presentation.js";
+export * from "./uwork-client-presentation.js";
+export * from "./desktop-client-presentation.js";
+export * from "./enterprise-console.js";

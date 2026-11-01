@@ -23,12 +23,14 @@ export function buildMcpStdioEnv(options: {
 export function createMcpTransportFetch(options: {
   env?: NodeJS.ProcessEnv;
   network?: NetworkEgressEnvPolicy;
+  beforeDispatch?: (url: string, signal?: AbortSignal | null) => Promise<boolean>;
 }): typeof globalThis.fetch {
   const fetch = createNetworkProxyFetch({
     caCertFile: options.network?.caCertFile,
     env: options.env ?? process.env,
     httpProxy: options.network?.httpProxy,
     noProxy: options.network?.noProxy,
+    beforeDispatch: options.beforeDispatch,
   });
   return (input, init) => withoutNetworkCapture(() => fetch(input, init));
 }

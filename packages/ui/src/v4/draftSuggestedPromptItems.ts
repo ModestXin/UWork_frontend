@@ -1,4 +1,8 @@
 import type { ClientSceneConfig, ClientSceneItem } from "@zcode/services";
+import {
+  matchPublishedInstalledPlugin,
+  type InstalledSuggestedPluginEntry,
+} from "./publishedSuggestedPlugins.js";
 
 export interface DraftSuggestedPromptLocalizedText {
   cn?: string;
@@ -27,6 +31,7 @@ export interface DraftSuggestedPromptItem {
   plugin?: {
     stableId: string;
     label: DraftSuggestedPromptLocalizedText;
+    installedOnly?: boolean;
   };
 }
 
@@ -72,6 +77,7 @@ function findDefaultItem(
 
 export function mapClientScenesToDraftSuggestedPromptItems(
   scenes: readonly ClientSceneConfig[],
+  installedPlugins: readonly InstalledSuggestedPluginEntry[] = [],
 ): DraftSuggestedPromptItem[] {
   const scene = scenes.find((candidate) => candidate.scene === "draft-suggestion");
   const promptItems = scene?.options.prompts?.items;
@@ -81,20 +87,27 @@ export function mapClientScenesToDraftSuggestedPromptItems(
     const defaultItem = findDefaultItem(scene, item);
     const actions = parseDraftSuggestedPromptActions(item.on_finish);
     const stableId = defaultItem?.contents.en?.trim() || defaultItem?.contents.cn?.trim();
+    const installed = item.pluginStableId
+      ? matchPublishedInstalledPlugin(item.pluginStableId, installedPlugins)
+      : undefined;
     return {
       id: item.id,
       ...(item.img?.trim() ? { iconName: item.img.trim() } : {}),
       label: item.labels,
       prompt: item.contents,
       ...(actions.length > 0 ? { actions } : {}),
-      ...(defaultItem && stableId
-        ? {
-            plugin: {
-              stableId,
-              label: defaultItem.labels,
-            },
-          }
-        : {}),
+      ...(item.pluginStableId
+        ? installed
+          ? { plugin: installed }
+          : {}
+        : defaultItem && stableId
+          ? {
+              plugin: {
+                stableId,
+                label: defaultItem.labels,
+              },
+            }
+          : {}),
     };
   });
 }

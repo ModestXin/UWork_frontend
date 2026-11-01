@@ -117,7 +117,8 @@ export async function resolveDiffBase(
 
 export async function changedFilesFromGit(cwd = process.cwd(), { base = "HEAD" } = {}) {
   const [diff, untracked] = await Promise.all([
-    gitFileNames(cwd, ["diff", "--name-only", "-z", base]),
+    // 内置工作区共享父仓库 Git；必须返回本工作区相对路径，避免漏查内部改动或混入兄弟目录。
+    gitFileNames(cwd, ["diff", "--relative", "--name-only", "-z", base]),
     gitFileNames(cwd, ["ls-files", "--others", "--exclude-standard", "-z"]),
   ]);
   return [...new Set([...diff, ...untracked])];

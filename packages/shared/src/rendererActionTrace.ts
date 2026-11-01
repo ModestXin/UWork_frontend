@@ -22,6 +22,7 @@ export const rendererActionTraceConfigSchema = z
     sampleRatio: z.number().finite().min(0).max(RENDERER_ACTION_TRACE_MAX_SAMPLE_RATIO),
     enabledGroups: z.array(rendererActionTraceGroupSchema).max(6),
     configVersion: z.string().trim().min(1).max(128),
+    bindingEpoch: z.string().trim().min(1).max(128).optional(),
   })
   .strict();
 export type RendererActionTraceConfigV1 = z.infer<typeof rendererActionTraceConfigSchema>;
@@ -115,6 +116,7 @@ export type RendererActionTraceResourceV1 = z.infer<typeof rendererActionTraceRe
 export const rendererActionTraceBatchSchema = z
   .object({
     version: z.literal(1),
+    bindingEpoch: z.string().trim().min(1).max(128).optional(),
     rendererInstanceId: boundedIdentifierSchema,
     sequence: z.number().int().nonnegative(),
     droppedSinceLastFlush: z.number().int().nonnegative(),

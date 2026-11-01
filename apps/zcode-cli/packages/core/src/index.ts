@@ -7,6 +7,8 @@ export * from "./agent/index.js";
 
 // Context Builder
 export * from "./context/index.js";
+export { createWorkflowExecutionAdmission } from "./runtime/helpers/workflow-execution-authorization.js";
+export type { WorkflowAuthorizationContext } from "./runtime/helpers/workflow-execution-authorization.js";
 
 // Compact helpers
 export * from "./compact/index.js";
@@ -17,8 +19,9 @@ export { resolveProjectMemoryRoot } from "./memory/project-root.js";
 // Tool components
 export { ToolScheduler, defaultToolScheduler, READ_ONLY_TOOLS } from "./tool/scheduler.js";
 export type { ToolSchedule, ToolScheduleItem, ToolDependency } from "./tool/scheduler.js";
-export { createToolRegistry, ToolRegistry, ToolRegistryImpl } from "./tool/registry.js";
-export { createToolExecutor, ToolExecutor, ToolExecutorImpl } from "./tool/executor.js";
+export { createToolRegistry, type ToolRegistry, ToolRegistryImpl } from "./tool/registry.js";
+// ToolExecutor 仅为接口；值导出会令源码 ESM 消费者在加载公开入口时失败。
+export { createToolExecutor, type ToolExecutor, ToolExecutorImpl } from "./tool/executor.js";
 export { builtInTools, registerBuiltInTools } from "./tool/handlers/index.js";
 // dwf driver 的 submit profile 运行时守卫要把 typed 声明换回通用声明。
 export {

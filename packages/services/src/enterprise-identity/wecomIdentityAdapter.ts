@@ -37,7 +37,7 @@ const authResponseSchema = z.object({
   needsEmailAuth: z.boolean().optional(),
 });
 
-async function readAuthResponse(response: Response): Promise<unknown> {
+export async function readAuthResponse(response: Response): Promise<unknown> {
   if (!response.body) throw new Error("Empty identity response");
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];

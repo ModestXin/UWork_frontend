@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "strict": true,
+    "composite": false,
+    "incremental": false,
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "disableSourceOfProjectReferenceRedirect": true
+  },
+  "include": ["test/enterpriseSettingsSyncSkills.test.ts", "src/settings-sync/**/*.ts"],
+  "references": [{ "path": "../shared" }, { "path": "../rpc" }]
+}

@@ -16,6 +16,7 @@ import {
   type ModelToolSideEffectScope,
   type RiskLevel,
   type ToolPermissionSpec,
+  type EnterpriseToolAuthorizationPort,
 } from "@zcode/contracts";
 import { OFFICIAL_CUA_PERMISSION_RULE_TOOL_NAME } from "@zcode/shared";
 import { resolvePlanModeTransitionPermission } from "./plan-mode-policy.js";
@@ -92,7 +93,10 @@ export class PermissionService {
    */
   private sessionRules: PermissionRuleset = { version: 1 };
 
-  constructor(private config: PermissionConfig = defaultPermissionConfig) {}
+  constructor(
+    private config: PermissionConfig = defaultPermissionConfig,
+    readonly enterpriseAuthorization?: EnterpriseToolAuthorizationPort,
+  ) {}
 
   grantSessionPermission(updates: PermissionUpdate[]): void {
     this.sessionRules = applyPermissionUpdates(this.sessionRules, updates);

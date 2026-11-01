@@ -1,7 +1,10 @@
+import type {
+  ProviderSettingsPolicy,
+  ProviderSettingsPolicyScope,
+} from "./uworkProviderSettingsPolicy.js";
 import type { Event } from "@zcode/rpc";
 import { ServiceChannels } from "@zcode/shared";
 import {
-  UCAS_PROVIDER_ID,
   type ModelConfigObject,
   type ModelId,
   type ModelSelection,
@@ -20,6 +23,8 @@ import {
 import { createServiceDescriptor } from "../descriptors.js";
 import type { ModelConnectivityResult } from "@zcode/shared";
 import { createServiceLogger } from "../logger/serviceLogger.js";
+import type { UWorkGatewayModelDescriptor } from "../ucas-gateway/contract.js";
+import { createGatewayProviderProvisioning } from "./gatewayProviderProvisioning.js";
 
 export type {
   ProviderSettingsProviderView,
@@ -34,7 +39,20 @@ export interface ProviderModelDiscoveryResult {
   readonly added: number;
   readonly skipped: number;
 }
-export type ProviderModelDiscoverer = (config: ProviderConfigObject) => Promise<readonly string[]>;
+export type ProviderModelDiscoverer = (
+  config: ProviderConfigObject,
+  scope?: ProviderSettingsPolicyScope,
+) => Promise<readonly string[]>;
+
+/** Symbol入口只供Root的现有Gateway owner使用，string RPC不能调用。 */
+export const providerSettingsTrustedGatewayProvisioning = Symbol(
+  "providerSettingsTrustedGatewayProvisioning",
+);
+export type HostProviderSettingsService = IProviderSettingsService & {
+  [providerSettingsTrustedGatewayProvisioning](
+    input: TrustedUcasGatewayProvisioningInput,
+  ): Promise<UcasGatewayProvisioningResult>;
+};
 
 /** 企业网关写入 Provider 的入参/结果；模型只追加，Key 只补缺或显式替换。 */
 export interface UcasGatewayProvisioningInput {
@@ -42,6 +60,14 @@ export interface UcasGatewayProvisioningInput {
   readonly apiKey?: string;
   readonly replaceApiKey?: boolean;
   readonly modelIds?: readonly string[];
+}
+
+/** 只供Host私有Symbol端口消费；公开个人配置方法不读取该字段。 */
+export interface TrustedUcasGatewayProvisioningInput extends UcasGatewayProvisioningInput {
+  readonly clearManagedCatalog?: true;
+  readonly managedModels?: readonly UWorkGatewayModelDescriptor[];
+  readonly authMode?: "enterprise-session";
+  readonly isCurrent?: () => boolean;
 }
 
 export interface UcasGatewayProvisioningResult {
@@ -142,22 +168,41 @@ export function createProviderSettingsService(
   ensureReady: () => Promise<void> = async () => {},
   testConnectivity?: ProviderSettingsConnectivityTester,
   discoverModels?: ProviderModelDiscoverer,
-): IProviderSettingsService {
+  policy?: ProviderSettingsPolicy,
+): HostProviderSettingsService {
+  const admitted = <T>(operation: (scope?: ProviderSettingsPolicyScope) => Promise<T>) =>
+    policy ? policy.run(operation) : operation();
+  const personal = <T>(operation: () => Promise<T>) =>
+    admitted(async (scope) => {
+      await ensureReady();
+      await scope?.authorize("personal");
+      const result = await operation();
+      await scope?.authorize("personal");
+      return result;
+    });
+  const providerUrl = (providerId: ProviderId) =>
+    facade.getView().providers.find((item) => item.providerId === providerId)?.effectiveConfig.api
+      ?.baseUrl ?? undefined;
   const inFlight = new Map<string, Promise<ProviderModelDiscoveryResult>>();
-  const discover = async (providerId: string): Promise<ProviderModelDiscoveryResult> => {
-    await ensureReady();
-    await facade.waitForProviderOperations(providerId);
-    const before = facade.getView();
-    const provider = before.providers.find((item) => item.providerId === providerId);
-    if (!provider || provider.effectiveConfig.group !== "standard-personal")
-      throw new Error("请选择自定义供应商");
-    if (!discoverModels) throw new Error("当前 Host 不支持自动获取模型，请更新 Host");
-    const ids = await discoverModels(provider.effectiveConfig);
-    const existing = new Set(provider.models.map((model) => model.modelId));
-    const added = ids.filter((id) => !existing.has(id)).length;
-    const view = await facade.addDiscoveredModels(providerId, ids, before.revision);
-    return { view, discovered: ids.length, added, skipped: ids.length - added };
-  };
+  const discover = (providerId: string): Promise<ProviderModelDiscoveryResult> =>
+    admitted(async (scope) => {
+      await ensureReady();
+      await facade.waitForProviderOperations(providerId);
+      await scope?.authorize("personal");
+      const before = facade.getView();
+      const provider = before.providers.find((item) => item.providerId === providerId);
+      if (!provider || provider.effectiveConfig.group !== "standard-personal")
+        throw new Error("请选择自定义供应商");
+      if (!discoverModels) throw new Error("当前 Host 不支持自动获取模型，请更新 Host");
+      const ids = await discoverModels(provider.effectiveConfig, scope);
+      await scope?.authorize("personal", provider.effectiveConfig.api?.baseUrl ?? undefined);
+      const existing = new Set(provider.models.map((model) => model.modelId));
+      const added = ids.filter((id) => !existing.has(id)).length;
+      const view = await facade.addDiscoveredModels(providerId, ids, before.revision);
+      await scope?.authorize("personal", provider.effectiveConfig.api?.baseUrl ?? undefined);
+      return { view, discovered: ids.length, added, skipped: ids.length - added };
+    });
+  const applyGatewayProvisioning = createGatewayProviderProvisioning(facade, ensureReady);
   return {
     onDidChange: toEvent((listener) => facade.onDidChange(listener)),
     discoverModels: (providerId) => {
@@ -181,126 +226,114 @@ export function createProviderSettingsService(
       await ensureReady();
       return facade.refresh(reason);
     },
-    createPersonalProvider: async (input) => {
-      await ensureReady();
-      return facade.createPersonalProvider(input);
-    },
-    resolveModelConfig: async (input) => {
-      await ensureReady();
-      return facade.resolveModelConfig(input);
-    },
-    savePersonalProviderOverlay: async (providerId, config, metadata) => {
-      await ensureReady();
-      return facade.savePersonalProviderOverlay(providerId, config, metadata);
-    },
-    setUcasApiKeyIfMissing: async (apiKey) => {
-      await ensureReady();
-      return facade.setUcasApiKeyIfMissing(apiKey);
-    },
-    applyUcasGatewayProvisioning: async (input) => {
-      await ensureReady();
-      await facade.waitForProviderOperations(UCAS_PROVIDER_ID);
-      const applied = await facade.applyUcasGatewayConfig({
-        baseUrl: input.baseUrl,
-        ...(input.apiKey === undefined ? {} : { apiKey: input.apiKey }),
-        ...(input.replaceApiKey === undefined ? {} : { replaceApiKey: input.replaceApiKey }),
-      });
-      const provider = applied.view.providers.find((item) => item.providerId === UCAS_PROVIDER_ID);
-      if (!provider) throw new Error("UCAS 默认供应商不可用");
-      const ids = [
-        ...new Set((input.modelIds ?? []).map((modelId) => modelId.trim()).filter(Boolean)),
-      ];
-      const existing = new Set(provider.models.map((model) => model.modelId));
-      const added = ids.filter((modelId) => !existing.has(modelId));
-      const view =
-        added.length === 0
-          ? applied.view
-          : await facade.addDiscoveredModels(UCAS_PROVIDER_ID, ids, applied.view.revision);
-      const effective = view.providers.find((item) => item.providerId === UCAS_PROVIDER_ID);
-      const access = effective?.effectiveConfig.access;
-      return {
-        view,
-        apiKeyApplied: applied.apiKeyApplied,
-        hasApiKey: Boolean(
-          access?.type === "api-key" && typeof access.apiKey === "string" && access.apiKey.trim(),
-        ),
-        modelsAdded: added.length,
-        modelsSkipped: ids.length - added.length,
-      };
-    },
-    deletePersonalProvider: async (providerId) => {
-      await ensureReady();
-      return facade.deletePersonalProvider(providerId);
-    },
-    reorderPersonalProviders: async (providerIds) => {
-      await ensureReady();
-      return facade.reorderPersonalProviders(providerIds);
-    },
-    reorderPersonalModels: async (providerId, modelIds) => {
-      await ensureReady();
-      return facade.reorderPersonalModels(providerId, modelIds);
-    },
-    addPersonalModel: async (providerId, modelId, config, useRecommendedConfig) => {
-      await ensureReady();
-      return facade.addPersonalModel(providerId, modelId, config, useRecommendedConfig);
-    },
-    renamePersonalModel: async (providerId, currentModelId, nextModelId) => {
-      await ensureReady();
-      return facade.renamePersonalModel(providerId, currentModelId, nextModelId);
-    },
-    deletePersonalModel: async (providerId, modelId) => {
-      await ensureReady();
-      return facade.deletePersonalModel(providerId, modelId);
-    },
-    savePersonalModelDraft: async (input) => {
-      await ensureReady();
-      return facade.savePersonalModelDraft(input);
-    },
-    setPersonalModelEnabled: async (providerId, modelId, enabled) => {
-      await ensureReady();
-      return facade.setPersonalModelEnabled(providerId, modelId, enabled);
-    },
-    testModelConnectivity: async (input) => {
-      await ensureReady();
-      if (!testConnectivity) {
-        throw new Error("当前 Environment 未装配模型连通性测试能力");
-      }
-      await facade.waitForProviderOperations(input.providerId);
-      // 禁用对象仍存在于配置视图，但不进入执行 Registry；不能把未发布误报成配置丢失。
-      // 只消费操作完成后的公共资格，不另查 Key、权益，也不替代目标 Environment 最终校验。
-      const provider = facade
-        .getView()
-        .providers.find((item) => item.providerId === input.providerId);
-      const model = provider?.models.find((item) => item.modelId === input.modelId);
-      const unavailable =
-        !provider || !provider.enabled
-          ? "provider-unavailable"
-          : !model || !model.enabled || model.issues.length > 0
-            ? "model-unavailable"
-            : !provider.executable
-              ? "provider-unavailable"
-              : !model.executable
-                ? "model-unavailable"
-                : undefined;
-      if (unavailable) {
-        return {
-          success: false,
-          error: {
-            code: unavailable,
-            message:
-              unavailable === "provider-unavailable"
-                ? "This provider is currently unavailable for connectivity testing."
-                : "This model is currently unavailable for connectivity testing.",
-          },
-        };
-      }
-      return testConnectivity({
-        workspacePath: input.workspacePath,
-        ...(input.workspaceIdentity ? { workspaceIdentity: input.workspaceIdentity } : {}),
-        providerId: input.providerId,
-        modelId: input.modelId,
-      });
-    },
+    createPersonalProvider: (input) =>
+      personal(() => {
+        if (
+          input?.initialConfig?.access?.type === "enterprise-session" ||
+          input?.initialConfig?.enterpriseModelIds !== undefined ||
+          (input?.initialConfig && Object.hasOwn(input.initialConfig, "enterpriseModelNames"))
+        )
+          throw new Error("enterprise_session_private_only");
+        return facade.createPersonalProvider(input);
+      }),
+    resolveModelConfig: (input) =>
+      admitted(async (scope) => {
+        await ensureReady();
+        await scope?.authorize("resolve", providerUrl(input.providerId));
+        const result = facade.resolveModelConfig(input);
+        await scope?.authorize("resolve", providerUrl(input.providerId));
+        return result;
+      }),
+    savePersonalProviderOverlay: (providerId, config, metadata) =>
+      personal(() => {
+        // 公开RPC只能编辑个人配置；无凭据受管模式必须由当前Gateway的私有Symbol入口建立。
+        if (
+          config.access?.type === "enterprise-session" ||
+          config.enterpriseModelIds !== undefined ||
+          Object.hasOwn(config, "enterpriseModelNames")
+        )
+          throw new Error("enterprise_session_private_only");
+        return facade.savePersonalProviderOverlay(providerId, config, metadata);
+      }),
+    setUcasApiKeyIfMissing: (apiKey) => personal(() => facade.setUcasApiKeyIfMissing(apiKey)),
+    applyUcasGatewayProvisioning: (input) =>
+      personal(() => {
+        if (
+          Object.hasOwn(input, "enterpriseModelNames") ||
+          Object.hasOwn(input, "clearManagedCatalog")
+        )
+          throw new Error("enterprise_session_private_only");
+        return applyGatewayProvisioning(input);
+      }),
+    // 只有私有Gateway路径透传后台描述；JS伪造公开入参不能改变受管模型事实。
+    [providerSettingsTrustedGatewayProvisioning]: (input) =>
+      applyGatewayProvisioning(
+        input,
+        input.managedModels,
+        input.authMode === "enterprise-session",
+        input.isCurrent,
+        input.clearManagedCatalog,
+      ),
+    deletePersonalProvider: (providerId) =>
+      personal(() => facade.deletePersonalProvider(providerId)),
+    reorderPersonalProviders: (providerIds) =>
+      personal(() => facade.reorderPersonalProviders(providerIds)),
+    reorderPersonalModels: (providerId, modelIds) =>
+      personal(() => facade.reorderPersonalModels(providerId, modelIds)),
+    addPersonalModel: (providerId, modelId, config, useRecommendedConfig) =>
+      personal(() => facade.addPersonalModel(providerId, modelId, config, useRecommendedConfig)),
+    renamePersonalModel: (providerId, currentModelId, nextModelId) =>
+      personal(() => facade.renamePersonalModel(providerId, currentModelId, nextModelId)),
+    deletePersonalModel: (providerId, modelId) =>
+      personal(() => facade.deletePersonalModel(providerId, modelId)),
+    savePersonalModelDraft: (input) => personal(() => facade.savePersonalModelDraft(input)),
+    setPersonalModelEnabled: (providerId, modelId, enabled) =>
+      personal(() => facade.setPersonalModelEnabled(providerId, modelId, enabled)),
+    testModelConnectivity: (input) =>
+      admitted(async (scope) => {
+        await ensureReady();
+        if (!testConnectivity) {
+          throw new Error("当前 Environment 未装配模型连通性测试能力");
+        }
+        await facade.waitForProviderOperations(input.providerId);
+        await scope?.authorize("resolve", providerUrl(input.providerId));
+        // 禁用对象仍存在于配置视图，但不进入执行 Registry；不能把未发布误报成配置丢失。
+        // 只消费操作完成后的公共资格，不另查 Key、权益，也不替代目标 Environment 最终校验。
+        const provider = facade
+          .getView()
+          .providers.find((item) => item.providerId === input.providerId);
+        const model = provider?.models.find((item) => item.modelId === input.modelId);
+        const unavailable =
+          !provider || !provider.enabled
+            ? "provider-unavailable"
+            : !model || !model.enabled || model.issues.length > 0
+              ? "model-unavailable"
+              : !provider.executable
+                ? "provider-unavailable"
+                : !model.executable
+                  ? "model-unavailable"
+                  : undefined;
+        if (unavailable) {
+          return {
+            success: false,
+            error: {
+              code: unavailable,
+              message:
+                unavailable === "provider-unavailable"
+                  ? "This provider is currently unavailable for connectivity testing."
+                  : "This model is currently unavailable for connectivity testing.",
+            },
+          };
+        }
+        const result = await testConnectivity({
+          workspacePath: input.workspacePath,
+          ...(input.workspaceIdentity ? { workspaceIdentity: input.workspaceIdentity } : {}),
+          providerId: input.providerId,
+          modelId: input.modelId,
+        });
+        await scope?.authorize("resolve", providerUrl(input.providerId));
+        return result;
+      }),
   };
 }
 
@@ -308,6 +341,7 @@ export function createModelSelectionService(
   facade: ModelSelectionFacade,
   ensureReady: () => Promise<void> = async () => {},
   configuredDefaultSource?: ModelSelectionConfiguredDefaultSource,
+  onDidInvalidateManagedCatalog?: (listener: () => void) => () => void,
 ): IModelSelectionService & { dispose(): void } {
   const log = createServiceLogger("model-selection");
   let revision = 0;
@@ -341,6 +375,13 @@ export function createModelSelectionService(
   };
   const disposeFacade = facade.onDidChange(emit);
   const disposeConfiguredDefault = configuredDefaultSource?.onDidChange?.(emit);
+  const disposeInvalidation = onDidInvalidateManagedCatalog?.(() => {
+    if (disposed) return;
+    // 明确撤销先同步发当前候选；不能等待磁盘默认偏好读完才撤掉旧ready。
+    revision += 1;
+    const { preferredSelection: _preferred, ...current } = facade.getView(undefined, revision);
+    for (const listener of listeners) listener(current);
+  });
 
   return {
     onDidChange: (listener) => {
@@ -353,6 +394,7 @@ export function createModelSelectionService(
       disposed = true;
       disposeFacade();
       disposeConfiguredDefault?.();
+      disposeInvalidation?.();
       listeners.clear();
     },
   };

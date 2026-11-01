@@ -52,6 +52,8 @@ export interface ClientSceneItem {
   };
   share_urls?: Record<string, string>;
   defaults?: Record<string, string[]>;
+  /** Opaque published hint, usable only after an exact enabled installed-catalog match. */
+  pluginStableId?: string;
 }
 
 export type ClientScenesResponse = ClientSceneResponseBody<ClientSceneConfig[]>;

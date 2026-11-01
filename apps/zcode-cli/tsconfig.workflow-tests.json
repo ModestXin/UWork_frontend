@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.test.json",
+  "include": [
+    "packages/core/test/enterprise-workflow-execution.test.ts",
+    "packages/bootstrap/test/enterprise-workflow-*.test.ts",
+    "packages/dynamic-workflow-runtime/test/enterprise-workflow-harness.test.ts"
+  ]
+}

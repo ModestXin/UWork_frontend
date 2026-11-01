@@ -40,6 +40,10 @@ import type {
   TopicResourcePort,
   PdfDocumentPort,
   PermissionBrokerPort,
+  EnterpriseModelRelayPort,
+  EnterpriseToolAuthorizationPort,
+  EnterpriseSkillsCatalogPort,
+  EnterpriseConnectorPort,
   PluginLoadOutcome,
   PluginMetadata,
   PluginReferenceCatalog,
@@ -173,6 +177,13 @@ export interface ZCodeAppOptions {
    * runtime 取派生实例。
    */
   providerRuntimeHeadersPort?: ProviderRuntimeHeadersPort;
+  turnPresentationPort?: import("@zcode/core").AgentRuntimeDeps["turnPresentationPort"];
+  /** Trusted Host-only gate; never read from runtime or workspace configuration. */
+  enterpriseToolAuthorization?: EnterpriseToolAuthorizationPort;
+  enterpriseSkillsCatalog?: EnterpriseSkillsCatalogPort;
+  /** 企业连接器帧出口；与资产准入同源，缺失即不接管 MCP owner。 */
+  enterpriseConnectors?: EnterpriseConnectorPort;
+  enterpriseModelRelay?: EnterpriseModelRelayPort;
   loggerFactory?: LoggerFactory;
   officialPluginRoots?: string[];
   pluginStorageRoot?: string;

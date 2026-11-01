@@ -194,6 +194,7 @@ export interface ProviderSettingsCreationResult {
 
 export interface ModelSelectionModelView {
   readonly modelId: ModelId;
+  readonly displayName?: string;
   readonly config: RegistryModelConfigObject;
 }
 
@@ -612,6 +613,11 @@ export class ModelSelectionFacade {
 export function projectModelSelectionProviderView(
   provider: ProviderRegistryView["providers"][number],
 ): ModelSelectionProviderView {
+  // 只有当前受管UCAS候选使用后台名称；原型属性和其他连接不能成为显示事实。
+  const names =
+    provider.providerId === UCAS_PROVIDER_ID && provider.config.access.type === "enterprise-session"
+      ? provider.config.enterpriseModelNames
+      : undefined;
   return Object.freeze({
     providerId: provider.providerId,
     providerName: provider.providerName,
@@ -621,6 +627,9 @@ export function projectModelSelectionProviderView(
       provider.models.map((model) =>
         Object.freeze({
           modelId: model.modelId,
+          ...(names && Object.hasOwn(names, model.modelId)
+            ? { displayName: names[model.modelId] }
+            : {}),
           config: serializeRegistryModelConfig(model.config),
         }),
       ),

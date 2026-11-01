@@ -1,5 +1,7 @@
 export interface ApiRequestInit extends RequestInit {
   timeoutMs?: number;
+  /** Host-local guard after async URL/proxy setup and immediately before HTTP dispatch; never serialized over RPC. */
+  beforeDispatch?: (url: string) => Promise<void>;
 }
 
 export interface ApiClient {

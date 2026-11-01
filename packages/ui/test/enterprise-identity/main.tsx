@@ -204,6 +204,7 @@ const authenticateFixture = () => {
   return view;
 };
 const service: IEnterpriseIdentityService = {
+  readClientPresentation: async () => ({ status: "unmanaged" }),
   onDidChange: changed.event,
   getView: async () => view,
   restoreSession: async () => {

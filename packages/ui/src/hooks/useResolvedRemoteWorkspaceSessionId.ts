@@ -1,4 +1,4 @@
-import { useTabStore } from "@/store/TabStoreProvider.js";
+import { useTabStore, type TabStoreAccessOptions } from "@/store/TabStoreProvider.js";
 import { isWorkspaceTab, type WorkspaceTabState } from "@/store/tabStore.js";
 import { useRemoteWorkspaceSessionStore } from "@/store/remoteWorkspaceSessionStore.js";
 import {
@@ -55,6 +55,7 @@ export function useResolvedRemoteWorkspaceSessionId(
   preferredRemoteSessionId?: string | null,
   workspaceIdentity?: string | null,
   remoteTarget?: unknown,
+  tabStoreOptions?: TabStoreAccessOptions,
 ): string | null {
   const activeWorkspaceTab = useTabStore((state) => {
     if (!workspacePath || !state.activeTabId) {
@@ -71,7 +72,7 @@ export function useResolvedRemoteWorkspaceSessionId(
     }
 
     return activeTab.workspacePath === workspacePath ? activeTab : null;
-  });
+  }, tabStoreOptions);
 
   return useRemoteWorkspaceSessionStore((state) =>
     resolveRemoteWorkspaceSessionIdForTarget({

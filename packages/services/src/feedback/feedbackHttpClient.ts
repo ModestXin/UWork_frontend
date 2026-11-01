@@ -39,6 +39,8 @@ interface FeedbackHttpClientOptions {
   apiClient: ApiClient;
   getAuthHeaders: () => Promise<Record<string, string>>;
   logger?: ServiceLogger;
+  assertLegacyFeedbackAllowed?: () => Promise<void>;
+  signal?: AbortSignal;
 }
 
 interface FeedbackUploadProgressEvent {
@@ -314,6 +316,7 @@ export class FeedbackHttpClient {
     init?: ApiRequestInit,
     authHeaders?: Record<string, string>,
   ): Promise<T> {
+    const signal = init?.signal ?? this.options.signal;
     const headers = mergeFeedbackRequestHeaders(
       authHeaders ?? (await this.options.getAuthHeaders()),
       init?.headers,
@@ -336,11 +339,26 @@ export class FeedbackHttpClient {
     let response: Response;
     try {
       response = await requestWithHandshakeRetry(
-        () =>
-          this.options.apiClient.request(url, {
+        async () => {
+          signal?.throwIfAborted();
+          await this.options.assertLegacyFeedbackAllowed?.();
+          // 私有配置等待期间可能取消；不能把已取消上传交给下一层再尝试发凭据请求。
+          signal?.throwIfAborted();
+          return this.options.apiClient.request(url, {
             ...init,
+            signal,
             headers,
-          }),
+            ...(this.options.assertLegacyFeedbackAllowed
+              ? {
+                  beforeDispatch: async (target: string) => {
+                    await init?.beforeDispatch?.(target);
+                    await this.options.assertLegacyFeedbackAllowed!();
+                    signal?.throwIfAborted();
+                  },
+                }
+              : {}),
+          });
+        },
         ({ attempt, error, nextAttempt }) => {
           requestAttemptCount = nextAttempt;
           this.logger.warn(undefined, "反馈 HTTP 建连失败，准备重试", {
@@ -364,6 +382,8 @@ export class FeedbackHttpClient {
       throw error;
     }
     const durationMs = Date.now() - startedAt;
+    await this.options.assertLegacyFeedbackAllowed?.();
+    signal?.throwIfAborted();
     if (!response.ok) {
       const message = await readResponseError(response);
       this.logger.warn(undefined, "反馈 HTTP 请求失败", {
@@ -397,6 +417,8 @@ export class FeedbackHttpClient {
     }
     try {
       const result = unwrapFeedbackResponse<T>(responseJson);
+      await this.options.assertLegacyFeedbackAllowed?.();
+      signal?.throwIfAborted();
       this.logger.info(undefined, "反馈 HTTP 请求成功", {
         ...logContext,
         durationMs,
@@ -499,7 +521,8 @@ export class FeedbackHttpClient {
     contentType: string,
     options?: FeedbackUploadFileOptions,
   ): Promise<FeedbackAttachment> {
-    if (options?.signal?.aborted) {
+    const signal = options?.signal ?? this.options.signal;
+    if (signal?.aborted) {
       throw new FeedbackUploadCanceledError();
     }
     const fileStats = await stat(filePath);
@@ -514,6 +537,7 @@ export class FeedbackHttpClient {
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal,
         body: JSON.stringify({
           ticket_id: ticketId,
           ...(options?.messageId ? { message_id: options.messageId } : {}),
@@ -528,8 +552,11 @@ export class FeedbackHttpClient {
     await uploadOssForm(credential, filePath, filename, contentType, {
       size: fileStats.size,
       onUploadProgress: options?.onUploadProgress,
-      signal: options?.signal,
+      signal,
+      beforeDispatch: this.options.assertLegacyFeedbackAllowed,
     });
+    await this.options.assertLegacyFeedbackAllowed?.();
+    signal?.throwIfAborted();
     return {
       id: toStableNumericId(credential.attachment_id, 1),
       kind,
@@ -938,8 +965,11 @@ async function uploadOssForm(
     size: number;
     onUploadProgress?: (event: FeedbackUploadProgressEvent) => void;
     signal?: AbortSignal;
+    beforeDispatch?: () => Promise<void>;
   },
 ): Promise<void> {
+  // 获取上传凭据与文件 stat 都会让出执行权；直传 OSS 不能绕过当前 managed 决定。
+  await options.beforeDispatch?.();
   return new Promise((resolve, reject) => {
     const uploadUrl = new URL(credential.oss.host);
     const requestImpl = uploadUrl.protocol === "https:" ? httpsRequest : httpRequest;

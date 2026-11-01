@@ -1,4 +1,19 @@
 /** 企业网关展示格式化：金额、计数、Token、时间与网关主机名，全部走 Intl 与固定单位。 */
+export function gatewayAccountRoleId(role: string): string {
+  // 后台操作员/审计员并非普通成员；展示不改变最终由后台裁决的权限。
+  return [
+    "owner",
+    "admin",
+    "operator",
+    "auditor",
+    "member",
+    "super_admin",
+    "org_admin",
+    "user",
+  ].includes(role)
+    ? role
+    : "user";
+}
 export function formatUsd(locale: string, value: number): string {
   if (!Number.isFinite(value)) return "--";
   return new Intl.NumberFormat(locale, {
@@ -60,4 +75,9 @@ export function gatewayHostLabel(baseUrl: string): string {
 
 export function shortModelName(model: string): string {
   return model.length > 28 ? `${model.slice(0, 27)}…` : model;
+}
+export function formatCost(locale: string, value: number, unit?: "usd" | "credits"): string {
+  return unit === "credits"
+    ? `${new Intl.NumberFormat(locale).format(value)} Credit`
+    : formatUsd(locale, value);
 }

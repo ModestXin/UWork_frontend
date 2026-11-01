@@ -9,6 +9,7 @@ import {
   type EnterpriseIdentityCompletion,
   type EnterpriseIdentitySession,
   type EnterpriseIdentityView,
+  type UWorkClientPresentation,
 } from "@zcode/shared";
 import type { ICredentialService } from "../credential/credential.js";
 import type { IBroadcastService } from "../broadcast/broadcast.js";
@@ -24,9 +25,15 @@ import { createEnterpriseIdentityViewPublisher } from "./enterpriseIdentityViewP
 import type { EnterpriseIdentityAdapter, IEnterpriseIdentityService } from "./contract.js";
 import {
   registerIdentityServiceDisposer,
+  registerIdentityServiceAuthority,
+  registerIdentityServiceTurnPresentationReader,
   releaseIdentityOperation,
 } from "./identityServiceLifecycle.js";
 import { subscribeIdentityPeerChanges } from "./identityPeerSubscription.js";
+import {
+  readClientTurnPresentation,
+  type ClientPresentationReadOptions,
+} from "./clientPresentation.js";
 export { disposeEnterpriseIdentityService } from "./identityServiceLifecycle.js";
 
 const SYNC_CHANNEL = "state:enterprise-identity";
@@ -41,6 +48,9 @@ export function createEnterpriseIdentityService(options: {
   organizationStore?: IdentityOrganizationStore;
   broadcast?: Pick<IBroadcastService, "send" | "onMessage">;
   now?: () => number;
+  readClientPresentation?: (
+    options?: ClientPresentationReadOptions,
+  ) => Promise<UWorkClientPresentation>;
 }): IEnterpriseIdentityService {
   let adapter = options.adapter;
   const store = options.sessionStore ?? createLocalIdentitySessionStore(options.credentials);
@@ -83,6 +93,11 @@ export function createEnterpriseIdentityService(options: {
   let writes: Promise<unknown> = Promise.resolve();
   let expiryTimer: ReturnType<typeof setTimeout> | undefined;
   let disposed = false;
+  let presentationTask: {
+    generation: number;
+    revision: number;
+    promise: Promise<UWorkClientPresentation>;
+  } | null = null;
 
   const enqueue = <T>(operation: () => Promise<T>): Promise<T> => {
     const result = writes.then(operation, operation);
@@ -100,6 +115,7 @@ export function createEnterpriseIdentityService(options: {
     resultTask = null;
     pollTask = null;
     restoreTask = null;
+    presentationTask = null;
     return generation;
   };
   const ensureAdapter = async () => {
@@ -281,6 +297,40 @@ export function createEnterpriseIdentityService(options: {
   const service: IEnterpriseIdentityService = {
     onDidChange: changed.event,
     getView,
+    async readClientPresentation() {
+      if (disposed) return { status: "unavailable" };
+      const current = generation;
+      const revision = publisher.current().revision;
+      if (
+        !presentationTask ||
+        presentationTask.generation !== current ||
+        presentationTask.revision !== revision
+      ) {
+        const task = {
+          generation: current,
+          revision,
+          promise: (async (): Promise<UWorkClientPresentation> => {
+            try {
+              const view = await (options.readClientPresentation?.() ??
+                Promise.resolve({ status: "unmanaged" } as const));
+              // 多个 facade 只合并在途读取；换 owner 的旧成功/失败不能复活前一份界面配置。
+              return !disposed &&
+                current === generation &&
+                publisher.current().revision === revision
+                ? view
+                : { status: "unavailable" };
+            } catch {
+              return { status: "unavailable" };
+            }
+          })(),
+        };
+        presentationTask = task;
+        void task.promise.finally(() => {
+          if (presentationTask === task) presentationTask = null;
+        });
+      }
+      return structuredClone(await presentationTask.promise);
+    },
     restoreSession() {
       if (disposed) return getView();
       if (restoreTask) return restoreTask;
@@ -406,6 +456,7 @@ export function createEnterpriseIdentityService(options: {
       if (publisher.current().status !== "authenticated")
         signedOut(adapter ? null : "unconfigured");
       await writes;
+      await adapter?.cancel?.(attemptId);
     },
     async logout() {
       if (disposed) return;
@@ -446,6 +497,18 @@ export function createEnterpriseIdentityService(options: {
     },
     onFailure: () => logger.warn(undefined, "Enterprise peer synchronization failed"),
   });
+  registerIdentityServiceAuthority(service, () => ({
+    generation,
+    revision: knownRevision,
+    session,
+    signal: controller.signal,
+  }));
+  if (options.readClientPresentation) {
+    const read = options.readClientPresentation;
+    registerIdentityServiceTurnPresentationReader(service, (signal) =>
+      readClientTurnPresentation(read, signal),
+    );
+  }
   registerIdentityServiceDisposer(service, async () => {
     disposed = true;
     invalidate();

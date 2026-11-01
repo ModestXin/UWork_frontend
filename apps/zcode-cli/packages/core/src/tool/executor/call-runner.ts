@@ -6,6 +6,7 @@ import {
   createCoreError,
   createRootTraceContext,
   getCurrentTraceContext,
+  isCoreError,
   traceContextToLogContext,
   type ToolExecutionSpanWriter,
   type SessionEvent,
@@ -64,6 +65,14 @@ import { validateInitialModelToolInput, validateInput, validateOutput } from "./
 import type { ExecutableToolCall } from "../types.js";
 import { resolveEmbeddedSearchBranchCapability } from "../../embedded-search/capability.js";
 import { resolveToolEntryModelContract } from "../model-contract.js";
+import {
+  authorizeEnterpriseTool,
+  captureEnterpriseExecutionScope,
+  captureEnterpriseReadResultAuthority,
+  emitEnterpriseToolDenial,
+  matchesEnterpriseExecutionScope,
+  snapshotEnterpriseInput,
+} from "./enterprise-authorization.js";
 
 const UNDISCOVERED_TOOL_SCHEMA_EXPLANATION =
   "\n\nThis tool's schema was not sent to the API — it was not in the discovered-tool set derived from message history. " +
@@ -273,6 +282,22 @@ async function executeToolCallImpl(
       return result;
     }
 
+    const enterpriseBeforeHooks = await authorizeEnterpriseTool({
+      deps,
+      entry,
+      toolCall: canonicalToolCall,
+      executionInput,
+      scope: captureEnterpriseExecutionScope(deps),
+      traceContext,
+      phase: "before_hooks",
+      signal: options?.signal,
+    });
+    if (enterpriseBeforeHooks) {
+      telemetry?.setPermissionDecision("denied");
+      telemetry?.finishDenied("policy_denied");
+      return enterpriseBeforeHooks;
+    }
+
     const toolInputValidation = entry.validateInput?.(executionInput, {
       runtimeTaskRegistry: deps.runtimeTaskRegistry,
     });
@@ -326,6 +351,21 @@ async function executeToolCallImpl(
         return result;
       }
       executionInput = resolution.input;
+      const resolvedAdmission = await authorizeEnterpriseTool({
+        deps,
+        entry,
+        toolCall: canonicalToolCall,
+        executionInput,
+        scope: captureEnterpriseExecutionScope(deps),
+        traceContext,
+        phase: "before_hooks",
+        signal: options?.signal,
+      });
+      if (resolvedAdmission) {
+        telemetry?.setPermissionDecision("denied");
+        telemetry?.finishDenied("policy_denied");
+        return resolvedAdmission;
+      }
     }
 
     const preToolHookResult = await runPreToolUseHooks(
@@ -475,8 +515,30 @@ async function executeToolCallImpl(
     let readFileStateMetadata: ToolExecutionResult["readFileStateMetadata"];
     let skillTelemetryMetadata: SkillTelemetryMetadata | undefined;
     let failureStage: "handler" | "serialize" | "post_hook" = "handler";
+    let readHandlerCompleted = false;
+    let readResultWithheld: ToolExecutionResult | undefined;
 
     try {
+      const enterpriseScope = captureEnterpriseExecutionScope(deps);
+      const readResultAuthority = captureEnterpriseReadResultAuthority(deps, entry);
+      if (deps.permissionService.enterpriseAuthorization)
+        executionInput = snapshotEnterpriseInput(executionInput);
+      const enterpriseBeforeDispatch = await authorizeEnterpriseTool({
+        deps,
+        entry,
+        toolCall: canonicalToolCall,
+        executionInput,
+        scope: enterpriseScope,
+        traceContext,
+        phase: "before_dispatch",
+        signal: executionAbortController.signal,
+        readResultAuthority,
+      });
+      if (enterpriseBeforeDispatch) {
+        telemetry?.setPermissionDecision("denied");
+        telemetry?.finishDenied("policy_denied");
+        return enterpriseBeforeDispatch;
+      }
       const model = options?.model ?? deps.model;
       const embeddedSearchDecision = resolveEmbeddedSearchBranchCapability({
         bashAvailable: deps.registry.has("Bash"),
@@ -537,8 +599,8 @@ async function executeToolCallImpl(
         },
         bashShellSelection,
         setWorkingDirectory: deps.setWorkingDirectory,
-        workingDirectory: guardedWorkingDirectory ?? deps.getWorkingDirectory(),
-        workspaceRoot: deps.getWorkspaceRoot(),
+        workingDirectory: guardedWorkingDirectory ?? enterpriseScope.workingDirectory,
+        workspaceRoot: enterpriseScope.workspaceRoot,
         workspaceIdentity: deps.workspaceIdentity,
         remoteSessionId: deps.remoteSessionId,
         clientMode: deps.clientMode,
@@ -554,7 +616,38 @@ async function executeToolCallImpl(
       };
 
       const output = await executeWithTimeout(
-        entry.handler,
+        async (input, executionContext) => {
+          if (
+            deps.permissionService.enterpriseAuthorization &&
+            !matchesEnterpriseExecutionScope(deps, enterpriseScope)
+          )
+            return Promise.reject(
+              createCoreError(
+                CoreErrorType.PermissionDenied,
+                "enterprise_execution_context_changed",
+                { recoverable: true },
+              ),
+            );
+          executionContext.abortSignal.throwIfAborted();
+          const value = await entry.handler(input, executionContext);
+          if (readResultAuthority && !isToolHandlerFailure(value)) {
+            // 读后的复验仍属于同一个工具期限；不合作的授权端口也必须被原 abort/deadline 截断。
+            readHandlerCompleted = true;
+            readResultWithheld = await authorizeEnterpriseTool({
+              deps,
+              entry,
+              toolCall: canonicalToolCall,
+              executionInput,
+              scope: enterpriseScope,
+              traceContext,
+              phase: "before_result",
+              signal: executionAbortController.signal,
+              readResultAuthority,
+              deferFailureEvents: true,
+            });
+          }
+          return value;
+        },
         executionInput,
         context,
         deadline,
@@ -566,6 +659,13 @@ async function executeToolCallImpl(
         // handler 用返回值表达可预期业务失败；这里只转换到既有异常控制流，
         // 继续复用原来的 failure hook、事件和日志，不引入第二套执行生命周期。
         throw createToolHandlerFailureError(canonicalToolCall, output);
+      }
+      if (readResultWithheld) {
+        readResultWithheld.durationMs = Date.now() - startTime;
+        readResultWithheld.startedAt = new Date(startTime);
+        await emitEnterpriseToolDenial(deps, canonicalToolCall, traceContext, readResultWithheld);
+        telemetry?.finishDenied("policy_denied");
+        return readResultWithheld;
       }
       validateOutput(output, entry);
       // node_repl 同时承载 Browser Use 与 CUA，不能在注册时把整个 server 标成 official。
@@ -671,7 +771,26 @@ async function executeToolCallImpl(
       telemetry?.setOutputTruncated(serialization.truncated);
       telemetry?.finishCompleted();
       return result;
-    } catch (error) {
+    } catch (cause) {
+      const timedOut = isCoreError(cause) && cause.type === CoreErrorType.ToolTimeout;
+      const code = timedOut ? "enterprise_result_timeout" : "enterprise_authorization_cancelled";
+      const error =
+        readHandlerCompleted && executionAbortController.signal.aborted
+          ? createCoreError(
+              timedOut ? CoreErrorType.ToolTimeout : CoreErrorType.ToolCancelled,
+              `Read completed; content withheld (${code})`,
+              {
+                cause: cause instanceof Error ? cause : undefined,
+                recoverable: false,
+                context: {
+                  code,
+                  source: "enterprise-policy",
+                  handlerExecuted: true,
+                  resultWithheld: true,
+                },
+              },
+            )
+          : cause;
       const durationMs = Date.now() - startTime;
       const failureHookResult = await runPostToolUseFailureHooks(
         deps,

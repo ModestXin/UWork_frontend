@@ -202,7 +202,15 @@ export function ConversationFileSummaryPanel({
     try {
       const ack: CommandAck = await context.applyFileRewind(target);
       if (ack.status === "accepted" || ack.status === "duplicate") {
-        setDialogOpen(false);
+        // accepted只说明命令已处理；预检后外部改动仍可令文件事务失败，不能关窗冒充成功。
+        const result = ack.result;
+        if (result?.type !== "applyFileRewind") {
+          setError(intl.formatMessage({ id: "chat.changeSummary.rewindDialog.error" }));
+          return;
+        }
+        setPreview(result.preview);
+        if (result.applied) setDialogOpen(false);
+        else setError(intl.formatMessage({ id: "chat.changeSummary.rewindDialog.error" }));
       } else {
         setError(
           ack.message ?? intl.formatMessage({ id: "chat.changeSummary.rewindDialog.error" }),

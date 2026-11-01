@@ -16,6 +16,7 @@ import darkEmptyStateLogoUrl from "@/assets/UCAS.svg";
 import { cn } from "@/components/lib/utils.js";
 import { useZCodeIntl } from "@/i18n/IntlProvider.js";
 import { useIsOfficeMode } from "@/hooks/useInterfaceMode.js";
+import { useEnterpriseIdentity } from "@/hooks/useEnterpriseIdentity.js";
 import { logger } from "@/logger.js";
 
 const GREETING_BOUNDARY_HOURS = [5, 9, 12, 14, 18, 23] as const;
@@ -103,17 +104,21 @@ export function ConversationDraftEmptyState({
 }) {
   const { intl } = useZCodeIntl();
   const isOfficeMode = useIsOfficeMode();
+  const presentation = useEnterpriseIdentity()?.presentation;
   const [greetingDate, setGreetingDate] = useState(() => new Date());
   const [greetingFontSizePx, setGreetingFontSizePx] = useState(
     GREETING_MAX_FONT_SIZE_PX,
   );
   const greetingContainerRef = useRef<HTMLParagraphElement | null>(null);
   const greetingMeasurementRef = useRef<HTMLSpanElement | null>(null);
-  const greeting = intl.formatMessage({
-    id: isOfficeMode
-      ? "chat.empty.greeting.office"
-      : getChatEmptyGreetingMessageId(greetingDate),
-  });
+  const greeting =
+    presentation?.status === "ready"
+      ? presentation.welcome
+      : intl.formatMessage({
+          id: isOfficeMode
+            ? "chat.empty.greeting.office"
+            : getChatEmptyGreetingMessageId(greetingDate),
+        });
 
   useEffect(() => {
     const timeout = window.setTimeout(() => {
@@ -225,7 +230,7 @@ export function ConversationDraftEmptyState({
           } as CSSProperties
         }
         className={cn(
-          "relative z-10 w-full px-4 text-center font-medium text-foreground",
+          "relative z-10 w-full px-4 text-center font-medium text-foreground whitespace-pre-wrap break-words",
           compactForRemoteControl
             ? "text-xl/[1.2]"
             : "text-[length:var(--v4-draft-greeting-font-size)]/[1.2]",

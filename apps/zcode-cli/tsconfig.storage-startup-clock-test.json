@@ -1,0 +1,23 @@
+{
+  "extends": "./tsconfig.test.json",
+  "compilerOptions": {
+    "paths": {
+      "@zcode/contracts": ["./packages/contracts/src/index.ts"],
+      "@zcode/contracts/browser-control": [
+        "./packages/contracts/src/interfaces/browser-control.port.ts"
+      ],
+      "@zcode/contracts/*": ["./packages/contracts/src/*"],
+      "@zcode/core": ["./packages/core/src/index.ts"],
+      "@zcode/adapters/exec": ["./packages/adapters/src/exec/index.ts"],
+      "@zcode/dynamic-workflow": ["./packages/dynamic-workflow/src/index.ts"],
+      "@zcode/dynamic-workflow/*": ["./packages/dynamic-workflow/src/*"],
+      "@zcode/shared-types": ["./packages/shared-types/src/index.ts"],
+      "@zcode/adapters/storage": ["./packages/adapters/src/storage/index.ts"],
+      "@zcode/adapters": ["./packages/adapters/src/index.ts"]
+    }
+  },
+  "include": [
+    "packages/bootstrap/test/storageStartupClock.test.ts",
+    "packages/adapters/test/sqliteMigrationClock.test.ts"
+  ]
+}

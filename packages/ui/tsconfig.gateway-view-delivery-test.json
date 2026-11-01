@@ -1,0 +1,37 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "strict": true,
+    "composite": false,
+    "incremental": false,
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "disableSourceOfProjectReferenceRedirect": true,
+    "types": ["node"]
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "src/**/*.d.ts",
+    "src/**/*.json",
+    "test/gateway-view-delivery/main.tsx",
+    "test/gateway-view-delivery/port.ts",
+    "test/gateway-view-delivery/accessor.ts"
+  ],
+  "references": [
+    {
+      "path": "../provider"
+    },
+    {
+      "path": "../shared"
+    },
+    {
+      "path": "../services"
+    },
+    {
+      "path": "../rpc"
+    }
+  ]
+}

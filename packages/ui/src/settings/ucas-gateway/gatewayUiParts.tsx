@@ -15,6 +15,7 @@ export const ERROR_IDS: Record<UcasGatewayError, string> = {
   "signed-out": "error.signedOut",
   unconfigured: "error.unconfigured",
   unauthorized: "error.unauthorized",
+  forbidden: "error.forbidden",
   network: "error.network",
   failed: "error.failed",
 };

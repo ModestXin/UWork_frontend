@@ -144,6 +144,7 @@ export interface AgentRuntimeCoreMethods {
     traceContext: TraceContext;
   }): Promise<number>;
   drainPendingInput(options: {
+    abortSignal?: AbortSignal;
     activeTurn: ActiveTurnSteeringState;
     events: SessionEvent[];
     traceContext: TraceContext;
@@ -251,14 +252,21 @@ export interface AgentRuntimeCoreMethods {
   getToolExecutor(): ToolExecutor;
   subscribeEvents(sink: SessionEventSink): () => void;
   getContextBuilder(): ContextBuilder;
-  ensureContextInitialized(traceContext: TraceContext, model?: Model): Promise<void>;
+  ensureContextInitialized(
+    traceContext: TraceContext,
+    model?: Model,
+    signal?: AbortSignal,
+  ): Promise<void>;
   getSkillCatalog(traceContext: TraceContext): Promise<SkillLoadOutcome>;
   createContextBuilderFromSnapshot(
     snapshot: ContextSourceSnapshot,
     memoryRoot?: string,
     options?: { memoryIndexContent?: string; model?: Model; persistEnvInfo?: boolean },
   ): ContextBuilder;
-  loadProjectMemoryRoot(traceContext: TraceContext): Promise<string | undefined>;
+  loadProjectMemoryRoot(
+    traceContext: TraceContext,
+    signal?: AbortSignal,
+  ): Promise<string | undefined>;
   logMemorySkipped(
     traceContext: TraceContext,
     reason: string,
@@ -272,7 +280,10 @@ export interface AgentRuntimeCoreMethods {
   startMcpStartup(traceContext: TraceContext): Promise<McpConnectionSnapshot> | undefined;
   initializeMcp(traceContext: TraceContext): Promise<void>;
   refreshMcpToolsIfChanged(traceContext: TraceContext): Promise<void>;
-  discoverSkillsForContext(traceContext: TraceContext): Promise<SkillLoadOutcome | undefined>;
+  discoverSkillsForContext(
+    traceContext: TraceContext,
+    signal?: AbortSignal,
+  ): Promise<SkillLoadOutcome | undefined>;
   createConfigOnlyContextSnapshot(workingDirectory: string): ContextSourceSnapshot;
   initializeMessageHistoryFromContext(
     contextBuilder: ContextBuilder,

@@ -1,0 +1,20 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "composite": false,
+    "incremental": false,
+    "declaration": false,
+    "declarationMap": false,
+    "strict": true,
+    "lib": ["es2025", "dom"],
+    "types": ["node"],
+    "paths": { "@/*": ["../ui/src/*"] }
+  },
+  "include": [
+    "test/clientPresentationBindings.test.ts",
+    "test/clientPresentationHelp.test.ts",
+    "test/rendererTraceOwnership.test.ts",
+    "../ui/test/userActionTraceOwnership.test.ts"
+  ]
+}

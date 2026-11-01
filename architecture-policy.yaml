@@ -32,6 +32,18 @@ modules:
   - id: services
     roots: [ packages/services/src ]
     managed: false
+  - id: enterprise-console
+    roots: [packages/services/src/enterprise-console]
+    managed: true
+    requires: [shared, services]
+    publicEntrypoints:
+      [
+        packages/services/src/enterprise-console/contract.ts,
+        packages/services/src/enterprise-console/module.ts,
+      ]
+    layers: { app: app }
+    layerOrder: [app]
+    owner: enterprise-console
   - id: session
     roots: [ packages/services/src/session ]
     managed: false
@@ -1025,3 +1037,110 @@ exceptions:
       - packages/ui/src/settings/DynamicWorkflowModeSetting.tsx
       - packages/ui/src/store/dynamicWorkflowAvailabilityStore.ts
     reason: Admitted upstream files edited only to let the user's dynamic workflow mode choice always win and keep the settings row visible; adopting packages/shared/src and packages/ui/src needs a separate module boundary refactor.
+  - id: uwork-backend-client-adaptation-port
+    rule: unmanaged-new-file
+    paths:
+      - apps/zcode-cli/packages/adapters/src/exec/enterprise-execution.ts
+      - apps/zcode-cli/packages/adapters/src/http/enterprise-http.ts
+      - apps/zcode-cli/packages/adapters/src/mcp/enterprise-connectors.ts
+      - apps/zcode-cli/packages/adapters/src/model/enterprise-session-fetch.ts
+      - apps/zcode-cli/packages/adapters/src/skills/enterprise-skills.ts
+      - apps/zcode-cli/packages/bootstrap/src/app/enterprise-runtime-assets.ts
+      - apps/zcode-cli/packages/bootstrap/src/app/workflow-entry-admission.ts
+      - apps/zcode-cli/packages/bootstrap/src/app/workflow-io-admission.ts
+      - apps/zcode-cli/packages/bootstrap/src/app/workflow-model-admission.ts
+      - apps/zcode-cli/packages/bootstrap/src/enterprise-experts.ts
+      - apps/zcode-cli/packages/bootstrap/src/enterprise-subagent-profiles.ts
+      - apps/zcode-cli/packages/bootstrap/src/skill-runtime.ts
+      - apps/zcode-cli/packages/bootstrap/src/zcode-protocol/enterprise-connectors.ts
+      - apps/zcode-cli/packages/bootstrap/src/zcode-protocol/enterprise-model-relay.ts
+      - apps/zcode-cli/packages/bootstrap/src/zcode-protocol/enterprise-skills-catalog.ts
+      - apps/zcode-cli/packages/bootstrap/src/zcode-protocol/enterprise-tool-authorization.ts
+      - apps/zcode-cli/packages/bootstrap/src/zcode-protocol/workflow-authorization.ts
+      - apps/zcode-cli/packages/contracts/src/interfaces/enterprise-connector.port.ts
+      - apps/zcode-cli/packages/contracts/src/interfaces/enterprise-model-relay.port.ts
+      - apps/zcode-cli/packages/contracts/src/interfaces/enterprise-skills-catalog.port.example.ts
+      - apps/zcode-cli/packages/contracts/src/interfaces/enterprise-skills-catalog.port.ts
+      - apps/zcode-cli/packages/contracts/src/interfaces/enterprise-tool-authorization.port.ts
+      - apps/zcode-cli/packages/core/src/runtime/helpers/attachment-authorization.ts
+      - apps/zcode-cli/packages/core/src/runtime/helpers/project-memory-index.ts
+      - apps/zcode-cli/packages/core/src/runtime/helpers/workflow-execution-authorization.ts
+      - apps/zcode-cli/packages/core/src/runtime/methods/turn-presentation.ts
+      - apps/zcode-cli/packages/core/src/runtime/methods/workflow-authorization.ts
+      - apps/zcode-cli/packages/core/src/subagent/enterprise-profile-authorization.ts
+      - apps/zcode-cli/packages/core/src/tool/executor/enterprise-authorization.ts
+      - apps/zcode-cli/packages/dynamic-workflow-runtime/src/harness-admission.ts
+      - packages/desktop/src/host/clientPresentationBridge.ts
+      - packages/desktop/src/host/legacyRemoteWorkspaceRpcContract.ts
+      - packages/desktop/src/main/clientPresentationBindings.ts
+      - packages/desktop/src/main/clientPresentationHelp.ts
+      - packages/desktop/src/main/clientPresentationTrace.ts
+      - packages/desktop/src/main/desktopSingleInstanceStartupLog.ts
+      - packages/services/src/client-scenes/clientSceneProjection.ts
+      - packages/services/src/conversation-share/conversationShareLocalFiles.ts
+      - packages/services/src/conversation-share/uworkPublicationPolicy.ts
+      - packages/services/src/enterprise-assets/assetPackage.ts
+      - packages/services/src/enterprise-assets/assetSelection.ts
+      - packages/services/src/enterprise-assets/assetStore.ts
+      - packages/services/src/enterprise-assets/assetStoreFs.ts
+      - packages/services/src/enterprise-assets/connectorRelay.ts
+      - packages/services/src/enterprise-assets/contract.example.ts
+      - packages/services/src/enterprise-assets/contract.ts
+      - packages/services/src/enterprise-assets/enterpriseAssetsHost.ts
+      - packages/services/src/enterprise-assets/enterpriseAssetsLifecycle.ts
+      - packages/services/src/enterprise-assets/hostBackendAssets.ts
+      - packages/services/src/enterprise-assets/hostContract.ts
+      - packages/services/src/enterprise-identity/backendSessionContract.ts
+      - packages/services/src/enterprise-identity/clientPresentation.ts
+      - packages/services/src/enterprise-identity/uworkBackendSession.ts
+      - packages/services/src/enterprise-identity/uworkIdentityAdapter.ts
+      - packages/services/src/enterprise-identity/uworkModelStream.ts
+      - packages/services/src/enterprise-identity/uworkShareRequests.ts
+      - packages/services/src/enterprise-identity/uworkToolAuthorization.ts
+      - packages/services/src/enterprise-model-relay/relay.ts
+      - packages/services/src/model-provider/gatewayModelSelectionSource.ts
+      - packages/services/src/model-provider/gatewayProviderProvisioning.ts
+      - packages/services/src/model-provider/uworkGatewayModelConfig.ts
+      - packages/services/src/model-provider/uworkProviderSettingsPolicy.ts
+      - packages/services/src/skills/skillAccess.ts
+      - packages/services/src/ucas-gateway/gatewayCatalogLifecycle.ts
+      - packages/services/src/ucas-gateway/gatewayIdentityScope.ts
+      - packages/services/src/ucas-gateway/gatewayProjectionAdmission.ts
+      - packages/services/src/ucas-gateway/gatewayProvisioningReads.ts
+      - packages/services/src/ucas-gateway/gatewayViewProjection.ts
+      - packages/services/src/ucas-gateway/uworkGatewayClient.ts
+      - packages/services/src/zcode-agent/enterpriseToolAuthorizationBridge.ts
+      - packages/shared/src/desktop-client-presentation.ts
+      - packages/shared/src/enterprise-assets.ts
+      - packages/shared/src/enterprise-console.ts
+      - packages/shared/src/uwork-client-experience.ts
+      - packages/shared/src/uwork-client-presentation.ts
+      - packages/shared/src/zcode-protocol/enterprise-model-relay.ts
+      - packages/ui/src/enterprise-console/EnterpriseNavigation.tsx
+      - packages/ui/src/feedback/feedbackEntryPolicy.ts
+      - packages/ui/src/hooks/clientExperienceScope.ts
+      - packages/ui/src/hooks/enterpriseLoginErrorPresentation.ts
+      - packages/ui/src/hooks/useClientExperienceScope.ts
+      - packages/ui/src/hooks/useClientPresentation.ts
+      - packages/ui/src/hooks/useEnterpriseConsole.tsx
+      - packages/ui/src/lib/conversationShareAccess.ts
+      - packages/ui/src/lib/enterpriseMenuNavigation.ts
+      - packages/ui/src/lib/enterpriseModelErrorCopy.ts
+      - packages/ui/src/settings/mcpFailureCopy.ts
+      - packages/ui/src/settings/skillsFailureCopy.ts
+      - packages/ui/src/v4/EnterpriseRiskNotice.tsx
+      - packages/ui/src/v4/publishedSuggestedPlugins.ts
+      - packages/web/src/webBootstrapConnection.tsx
+      - packages/zcode-server-cli/src/runtime/serverCoreProfileEnvironment.ts
+      - apps/zcode-cli/packages/bootstrap/src/app/dynamic-workflow-run-submit.ts
+      - apps/zcode-cli/packages/bootstrap/src/app/workflow-driver-transcript.ts
+      - apps/zcode-cli/packages/bootstrap/src/app/workflow-driver-types.ts
+      - apps/zcode-cli/packages/core/src/runtime/methods/dynamic-workflow-run-settings.ts
+      - apps/zcode-cli/packages/core/src/tool/handlers/workflow-drafts.ts
+      - packages/desktop/src/main/databaseStartupRelay.ts
+      - packages/services/src/client-config/clientConfig.ts
+      - packages/services/src/client-config/clientConfigService.ts
+      - packages/services/src/ucas-gateway/gatewayWriteAdmission.ts
+      - packages/shared/src/subagent-profile.ts
+      - packages/ui/src/hooks/usePluginStoreOrder.ts
+    reason: uwork_backend 的客户端适配移植（企业身份/模型中继/企业控制台与资产/CLI 与桌面准入），文件落点沿用适配副本的目录结构，尚未按本仓模块边界拆分；移植批次与验收见 docs/integration/dev-system-integration-plan-2026-10-31.md。例外只放开新文件登记，依赖方向、环检测与类型检查仍全部执行；P1 收敛时按模块重排并删除本条。

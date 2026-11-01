@@ -35,6 +35,7 @@ interface LocalMediaResolverOptions extends Omit<
 > {
   fileSystemPort: FileSystemPort;
   workingDirectory: string;
+  beforeLocalContentRelease?: () => Promise<void>;
 }
 
 interface LocalMediaContext {
@@ -238,6 +239,7 @@ export async function resolveLocalMediaAttachment(
   } catch {
     return localMediaReadFailure(attachment, filename, mime, source);
   }
+  options.abortSignal?.throwIfAborted();
   if (stat.kind !== "file") {
     return resolvedPlaceholderAttachment(attachment, attachmentPath, "attachment_not_file", {
       filename,
@@ -292,6 +294,7 @@ async function resolveLocalPdfAttachment(
     }
     return localMediaReadFailure(attachment, filename, mime, source);
   }
+  options.abortSignal?.throwIfAborted();
   if (read.bytesRead === 0 || !isPdfBytes(read.content)) {
     return resolvedPlaceholderAttachment(attachment, attachment.path!, "attachment_pdf_invalid", {
       filename,
@@ -301,6 +304,8 @@ async function resolveLocalPdfAttachment(
     });
   }
   const dataUrl = `data:${mime};base64,${Buffer.from(read.content).toString("base64")}`;
+  // 原文件读/处理是异步的；派生正文写入 artifact 前必须复验，外层返回时再拦已经太晚。
+  await options.beforeLocalContentRelease?.();
   const resource = await persistAttachmentDataUrl(dataUrl, context.index, mime, {
     abortSignal: options.abortSignal,
     artifactStore: options.artifactStore,
@@ -362,6 +367,7 @@ async function resolveLocalImageAttachment(
   } catch {
     return localMediaReadFailure(attachment, filename, mime, source);
   }
+  options.abortSignal?.throwIfAborted();
   const dataUrl = `data:${mime};base64,${read.content}`;
   let prepared: PreparedImageData | undefined;
   try {
@@ -382,6 +388,7 @@ async function resolveLocalImageAttachment(
       source,
     });
   }
+  await options.beforeLocalContentRelease?.();
   const resource = await persistAttachmentDataUrl(prepared.dataUrl, index, prepared.mediaType, {
     abortSignal: options.abortSignal,
     artifactStore: options.artifactStore,
@@ -452,6 +459,7 @@ async function resolveLocalVideoAttachment(
     return localMediaReadFailure(attachment, filename, mime, source);
   }
   // 文件可能在 stat 后被清空，必须以实际读取结果判断是否为有效视频。
+  options.abortSignal?.throwIfAborted();
   if (read.bytesRead === 0) {
     return resolvedPlaceholderAttachment(attachment, attachment.path!, "attachment_video_invalid", {
       filename,
@@ -461,6 +469,7 @@ async function resolveLocalVideoAttachment(
     });
   }
   const dataUrl = `data:${mime};base64,${Buffer.from(read.content).toString("base64")}`;
+  await options.beforeLocalContentRelease?.();
   const resource = await persistAttachmentDataUrl(dataUrl, index, mime, {
     abortSignal: options.abortSignal,
     artifactStore: options.artifactStore,

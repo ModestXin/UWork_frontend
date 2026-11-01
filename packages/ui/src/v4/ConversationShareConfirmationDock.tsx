@@ -18,6 +18,11 @@ import { cn } from "@/components/lib/utils.js";
 import { Popover, PopoverContent, PopoverTitle, PopoverTrigger } from "@/components/ui/popover.js";
 import { useZCodeIntl } from "@/i18n/IntlProvider.js";
 import type { ConversationShareAccessMode } from "@zcode/shared";
+import {
+  accessModeToPermission,
+  permissionToAccessMode,
+  LEGACY_CONVERSATION_SHARE_ACCESS_MODES,
+} from "@/lib/conversationShareAccess.js";
 import { ConversationSharePermissionPicker } from "@/ConversationSharePermissionPicker.js";
 import {
   DEFAULT_CONVERSATION_SHARE_ACCESS_MODE,
@@ -54,6 +59,7 @@ export interface ConversationShareConfirmationDockProps {
   totalCount: number;
   title?: string;
   accessMode?: ConversationShareAccessMode;
+  availableAccessModes?: readonly ConversationShareAccessMode[];
   progressLabel?: string;
   progressPhase?: ConversationShareProgressPhase;
   completedArtifacts?: number;
@@ -86,6 +92,7 @@ function ConversationShareConfirmationDockImpl({
   totalCount,
   title = "Share",
   accessMode = DEFAULT_CONVERSATION_SHARE_ACCESS_MODE,
+  availableAccessModes = LEGACY_CONVERSATION_SHARE_ACCESS_MODES,
   progressLabel,
   progressPhase = "collecting",
   completedArtifacts = 0,
@@ -118,6 +125,7 @@ function ConversationShareConfirmationDockImpl({
   const reviewAnimationRef = useRef<Animation | null>(null);
   useEffect(() => () => reviewAnimationRef.current?.cancel(), []);
   const handleConfirm = () => {
+    if (!availableAccessModes.includes(accessMode)) return;
     if (!error && !disclosureAccepted) {
       setReviewRequired(true);
       // 仅对确认行做 transform 提示并滚动正文，不改变布局或牵动外层页面。
@@ -161,12 +169,15 @@ function ConversationShareConfirmationDockImpl({
         ? "conversationShare.progress.uploadingFailed"
         : "conversationShare.progress.checkingFailed";
   const progressPhaseIndex = SHARE_PROGRESS_PHASES.indexOf(progressPhase);
-  const accessSummaryMessageId =
-    accessMode === "public_readonly"
-      ? "conversationShare.permission.linkViewerSummary"
-      : accessMode === "public_importable"
-        ? "conversationShare.permission.linkEditorSummary"
-        : "conversationShare.permission.privateSummary";
+  const accessSummaryMessageId = !availableAccessModes.includes(accessMode)
+    ? "conversationShare.capabilityUnavailable"
+    : accessMode === "organization"
+      ? "conversationShare.permission.organizationSummary"
+      : accessMode === "public_readonly"
+        ? "conversationShare.permission.linkViewerSummary"
+        : accessMode === "public_importable"
+          ? "conversationShare.permission.linkEditorSummary"
+          : "conversationShare.permission.privateSummary";
   const footerMetaMessageId = error
     ? "conversationShare.publish.failedFooter"
     : pending
@@ -472,22 +483,9 @@ function ConversationShareConfirmationDockImpl({
                 </div>
               }
               <ConversationSharePermissionPicker
-                permission={
-                  accessMode === "public_readonly"
-                    ? "link-viewer"
-                    : accessMode === "public_importable"
-                      ? "link-editor"
-                      : "private"
-                }
-                onChange={(permission) =>
-                  onAccessModeChange(
-                    permission === "link-viewer"
-                      ? "public_readonly"
-                      : permission === "link-editor"
-                        ? "public_importable"
-                        : "private",
-                  )
-                }
+                availableAccessModes={availableAccessModes}
+                permission={accessModeToPermission(accessMode)}
+                onChange={(permission) => onAccessModeChange(permissionToAccessMode(permission))}
               />
             </div>
             {/* 设计原因：敏感信息确认需要保留警示语义，但把详细检查范围收进锚定浮层，避免确认 dock 被长文案撑高。 */}
@@ -888,7 +886,8 @@ function ConversationShareConfirmationDockImpl({
                 selectionEditing ||
                 publishDisabled ||
                 selectedCount === 0 ||
-                !title.trim()
+                !title.trim() ||
+                !availableAccessModes.includes(accessMode)
               }
               onClick={handleConfirm}
               data-testid="conversation-share-confirm"

@@ -1,3 +1,4 @@
+import { setInterval, clearInterval } from "node:timers";
 import type {
   ArmsCustomEventPayload,
   ArmsRumEnv,

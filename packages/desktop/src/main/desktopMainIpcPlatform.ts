@@ -67,6 +67,7 @@ import { registerCuaPipActiveSessionIpc } from "./desktopCuaPipIpc.js";
 
 export function registerPlatformIpcHandlers(options: {
   fetchHelpConfig?: () => Promise<unknown>;
+  canOpenClientCommunity?: (senderId: number, locale: Locale) => Promise<boolean | undefined>;
   logger: {
     info: (...args: unknown[]) => void;
     warn: (...args: unknown[]) => void;
@@ -372,12 +373,15 @@ export function registerPlatformIpcHandlers(options: {
     currentApplicationLocale: options.currentApplicationLocale,
   });
 
-  ipcMain.handle(PlatformChannels.CanOpenCommunity, async (_event, locale: unknown) => {
+  ipcMain.handle(PlatformChannels.CanOpenCommunity, async (event, locale: unknown) => {
     const result = localeSchema.safeParse(locale);
     if (!result.success) {
       options.logger.warn("[community] invalid locale:", formatZodError(result.error));
       return false;
     }
+
+    const managed = await options.canOpenClientCommunity?.(event.sender.id, result.data);
+    if (managed !== undefined) return managed;
 
     const communityUrl = await resolveCommunityUrl({
       locale: result.data,

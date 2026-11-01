@@ -10,10 +10,13 @@ export async function ensureMemoryDirectoryExists(
   rootDir: string,
   traceContext?: TraceContext,
   logger?: Logger,
+  signal?: AbortSignal,
 ): Promise<void> {
   try {
-    await fileSystemPort.createDirectory({ path: rootDir, trace: traceContext });
+    signal?.throwIfAborted();
+    await fileSystemPort.createDirectory({ path: rootDir, trace: traceContext }, { signal });
   } catch (error) {
+    signal?.throwIfAborted();
     // 目录预创建失败不阻断执行；实际 Write/Edit 仍返回原始文件错误。
     logger?.debug("Memory directory creation failed", {
       ...(traceContext ? traceContextToLogContext(traceContext) : {}),

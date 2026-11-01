@@ -82,15 +82,14 @@ export class ZCodeProtocolClient implements IDisposable {
   private readonly closeEmitter = new Emitter<void>();
   private readonly disposables: IDisposable[] = [];
   private nextRequestId = 1;
-  private disposed = false;
+  private readonly disposalController = new AbortController();
+  readonly disposeSignal: AbortSignal = this.disposalController.signal;
   private readonly requestTimeoutMs: number;
 
-  /**
-   * client 是否已 dispose（进程被回收/transport 关闭后为 true）。
-   * 调用方（如 getClient 复用 active entry）必须在复用前检查此标记，
-   * 避免对一个已被 processManager 回收但尚未触发 onClose 的 client 发请求，
-   * 否则会立即抛 "ZCode Protocol client is disposed"。
-   */
+  private get disposed(): boolean {
+    return this.disposeSignal.aborted;
+  }
+
   get isDisposed(): boolean {
     return this.disposed;
   }
@@ -275,7 +274,8 @@ export class ZCodeProtocolClient implements IDisposable {
     if (this.disposed) {
       return;
     }
-    this.disposed = true;
+    // 回收先同步取消反向请求；不能依赖随后被移除的 transport close 监听。
+    this.disposalController.abort();
     this.disposeLocalResources();
     this.transport.dispose();
   }
@@ -283,7 +283,7 @@ export class ZCodeProtocolClient implements IDisposable {
   async disposeAndWait(): Promise<void> {
     const wasDisposed = this.disposed;
     if (!wasDisposed) {
-      this.disposed = true;
+      this.disposalController.abort();
       this.disposeLocalResources();
     }
     if (this.transport.disposeAndWait) {

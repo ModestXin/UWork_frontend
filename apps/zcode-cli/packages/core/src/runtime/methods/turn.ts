@@ -1,4 +1,5 @@
 import { beginLocalTurnPreparation, type LocalTtftDetail } from "@zcode/contracts";
+import { applyTurnPresentation } from "./turn-presentation.js";
 import { runtimeInputMetadata } from "../../agent/runtime-input-presentation.js";
 import { withConversationQuotes } from "../helpers/conversation-quotes.js";
 import { ensureGroupTaskPermissionScope } from "./input-intent-persistence.js";
@@ -72,6 +73,7 @@ import { ACTIVE_PROJECT_MEMORY_RETRIEVAL_BRANCH } from "../../memory/project-mem
 import { scheduleProjectMemoryExtraction } from "../helpers/project-memory-extraction.js";
 import { appendBrowserTurnScreenshot } from "./browser-turn-screenshot.js";
 import { clearBrowserTurnState } from "../../repl/browser-turn-state.js";
+import { createPromptAttachmentAuthorizationContext } from "../helpers/attachment-authorization.js";
 import {
   acceptSubmissionModelSelection,
   captureHighspeedFallbackSelection,
@@ -87,7 +89,7 @@ import {
 
 const TARGET_RUN_HEARTBEAT_MS = 15_000;
 const MODEL_CREATION_FAILED_MESSAGE = "Model creation failed";
-const MODEL_CREATION_TURN_PHASE = "model_creation";
+const TURN_CONFIGURATION_UNAVAILABLE_MESSAGE = "Turn configuration unavailable";
 const TURN_EXECUTION_FAILED_MESSAGE = "Turn execution failed";
 
 export async function executeTurn(
@@ -250,10 +252,14 @@ export async function executeTurnCommand(
           }
         | undefined;
       // 普通轮创建模型失败后仍要保留已接纳输入；这里只记下原始错误，由主生命周期落库并收尾。
-      let creationFailure: { error: unknown } | undefined;
+      let creationFailure: { error: unknown; turnPhase: string } | undefined;
       // 创建期退回声明命中但所有候选都无法创建：TurnError 归因要带上该事实，Renderer 才能作废匹配卡。
       let creationFallbackUnavailable = false;
       try {
+        // admission/FIFO 已建立 reservation；慢配置读取不能在此前制造第二条 turn。
+        turnPhase = "presentation_preferences";
+        await applyTurnPresentation(this, turnAbortSignal, turnTraceContext);
+        turnPhase = "model_creation";
         admittedModel =
           rewindCommand === null
             ? createTurnModel(this, {
@@ -354,26 +360,31 @@ export async function executeTurnCommand(
             // 已接纳输入必须提升为 TurnStarted + 持久消息，否则只剩历史截断，重启也无法恢复文本。
             // CR-01：上一版复制了一份落库流程并在主 try 外执行，附件、取消或存储失败会直接穿出，
             // TurnStarted 之后没有终态，原始创建错误也被覆盖。这里只记下错误，落库与终态交给主链。
-            creationFailure = { error: reportedCreationError };
+            creationFailure = { error: reportedCreationError, turnPhase };
           } else {
             // /compact 不产生用户消息，创建失败直接写终态。
             turnFailureHandled = true;
+            // 展现代理读取失败与模型创建失败要给出不同文案，不能让配置错误伪装成模型错误。
+            const preparationMessage =
+              turnPhase === "presentation_preferences"
+                ? TURN_CONFIGURATION_UNAVAILABLE_MESSAGE
+                : MODEL_CREATION_FAILED_MESSAGE;
             const coreError = createTurnFailureError(
               reportedCreationError,
               turnAbortSignal,
-              MODEL_CREATION_FAILED_MESSAGE,
+              preparationMessage,
             );
             await appendTurnOutcomeEvent(this, {
               coreError,
               events,
               durationMs: Date.now() - turnStartedAtMs,
-              turnPhase: MODEL_CREATION_TURN_PHASE,
+              turnPhase,
               inputId: options?.inputId,
               // 卡身份仍以接纳时冻结的 intent 为准，不能依赖分页窗口中的 userInput 反查。
               highspeedCardId: options?.intent?.highspeed?.cardId,
               highspeedFallbackUnavailable: creationFallbackUnavailable,
               traceContext: turnTraceContext,
-              fallbackMessage: MODEL_CREATION_FAILED_MESSAGE,
+              fallbackMessage: preparationMessage,
               logEvent: "turn.failed",
               logLabel: "Turn",
             });
@@ -393,7 +404,7 @@ export async function executeTurnCommand(
         } else {
           // 首轮初始化已经用 admitted Model 构造并安装完整 Context，随后再 rebuild
           // 会把同一 Prefix 连续构造两次。未初始化与已初始化分支互斥，每个 model step 只构造一次。
-          await this.ensureContextInitialized(turnTraceContext, admittedModel);
+          await this.ensureContextInitialized(turnTraceContext, admittedModel, turnAbortSignal);
         }
         completeTurnPhase("context_initialization", phaseStartedAt);
         throwIfTurnAborted(turnAbortSignal);
@@ -612,17 +623,6 @@ export async function executeTurnCommand(
         injectReferencedSessionContextReminderIntoMessageHistory.call(this, input, options);
         // 话题原文由标准文本附件按需读取，可信来源归档不能再次生成隐藏上下文。
         injectDateChangeReminderIntoMessageHistory.call(this);
-        const resolvedAttachments = await resolveTurnAttachments(attachments, {
-          abortSignal: turnAbortSignal,
-          artifactStore: this.artifactStore,
-          fileSystemPort: this.fileSystemPort,
-          imageProcessorPort: this.imageProcessorPort,
-          sessionId: this.sessionId,
-          traceContext: turnTraceContext,
-          turnId,
-          workingDirectory: this.workingDirectory,
-        });
-        logResolvedTurnAttachments(this.logger, turnTraceContext, resolvedAttachments);
         const sharedContextRefs = options?.sharedContextRefs ?? options?.intent?.sharedContextRefs;
         if (sharedContextRefs && sharedContextRefs.length > 0) {
           const [reference] = sharedContextRefs;
@@ -663,6 +663,19 @@ export async function executeTurnCommand(
           }
         }
         await this.persistPendingModelChangeTimeline(turnTraceContext);
+        // shared-context / 切模持久化仍会等待；附件最后准入必须位于它们之后，紧邻同步 history 消费。
+        const resolvedAttachments = await resolveTurnAttachments(attachments, {
+          authorization: createPromptAttachmentAuthorizationContext(this, turnTraceContext),
+          abortSignal: turnAbortSignal,
+          artifactStore: this.artifactStore,
+          fileSystemPort: this.fileSystemPort,
+          imageProcessorPort: this.imageProcessorPort,
+          sessionId: this.sessionId,
+          traceContext: turnTraceContext,
+          turnId,
+          workingDirectory: this.workingDirectory,
+        });
+        logResolvedTurnAttachments(this.logger, turnTraceContext, resolvedAttachments);
         if (options?.skipInputRecord !== true && options?.inputVisibility === "model-only") {
           const inputSource = options.inputSource ?? "goal-continuation";
           const userContent = buildUserContentFromTurn(input, resolvedAttachments);
@@ -980,7 +993,9 @@ export async function executeTurnCommand(
           });
         }
         const fallbackMessage = reportedCreationFailure
-          ? MODEL_CREATION_FAILED_MESSAGE
+          ? reportedCreationFailure.turnPhase === "presentation_preferences"
+            ? TURN_CONFIGURATION_UNAVAILABLE_MESSAGE
+            : MODEL_CREATION_FAILED_MESSAGE
           : TURN_EXECUTION_FAILED_MESSAGE;
         const coreError = createTurnFailureError(
           reportedCreationFailure ? reportedCreationFailure.error : error,
@@ -1043,7 +1058,13 @@ export async function executeTurnCommand(
           coreError,
           events,
           durationMs: Date.now() - turnMachine.state.startedAt.getTime(),
-          turnPhase: reportedCreationFailure ? MODEL_CREATION_TURN_PHASE : turnMachine.state.phase,
+          // 模型循环尚未启动就失败/取消时状态机仍停在初始相位；此时报告创建期实际相位
+          // （presentation_preferences / model_creation），进入循环后沿用状态机相位。
+          turnPhase: reportedCreationFailure
+            ? reportedCreationFailure.turnPhase
+            : loopState === undefined
+              ? turnPhase
+              : turnMachine.state.phase,
           inputId: options?.inputId,
           highspeedCardId: options?.intent?.highspeed?.cardId,
           highspeedFallbackUnavailable:

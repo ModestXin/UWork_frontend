@@ -22,6 +22,7 @@ import {
   validateUninstallTarget,
 } from "./runtime/paths.js";
 import { validateServerInstallOwnership } from "./runtime/installationOwnership.js";
+import { createServerCoreProfileEnvironment } from "./runtime/serverCoreProfileEnvironment.js";
 import { createReleaseAgentWiring, type BundledAgentWiring } from "./runtime/agentWiring.js";
 import { writeStableLauncher } from "./runtime/stableLauncher.js";
 import { runLocalArchiveUpdateCommand, type UpdateDaemonHandoff } from "./runtime/updateCommand.js";
@@ -389,8 +390,7 @@ async function runServe(
           : process.execPath;
         const inheritedEnv = {
           ...process.env,
-          ZCODE_DATA_BASE_DIR: layout.dataBaseDir,
-          ZCODE_SERVER_ROOT: layout.serverRoot,
+          ...createServerCoreProfileEnvironment(layout),
         };
         const releaseWiring = runtimeRoot
           ? createReleaseAgentWiring(runtimeRoot, runtimeNode, inheritedEnv)

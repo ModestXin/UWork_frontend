@@ -17,6 +17,7 @@ import type {
 } from "@zcode/contracts";
 import { resolveDefaultSkillRoots, type SkillRootResolutionOptions } from "./roots.js";
 import { scanSkillFilesUnderRoot } from "./scan.js";
+export { withEnterpriseSkillAuthorization } from "./enterprise-skills.js";
 
 const MAX_DESCRIPTION_LENGTH = 1024;
 const SAFE_FRONTMATTER_KEYS = new Set([

@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { rootCertificates } from "node:tls";
 import {
   ZCODE_AGENT_CA_CERT_ENV_KEY,
   ZCODE_HTTP_PROXY_ENV_KEY,
@@ -131,7 +132,9 @@ export function loadTlsCaCertificates(options: NetworkTlsOptions): Buffer | unde
   if (!caCertFile) {
     return undefined;
   }
-  return readFileSync(caCertFile);
+  const customCa = readFileSync(caCertFile);
+  // tls.ca 会替换 Node 默认根；桌面自定义 CA 是附加语义，不能让正常公网证书失去信任。
+  return Buffer.concat([Buffer.from(rootCertificates.join("\n") + "\n"), customCa]);
 }
 
 function readExplicitNoProxyValue(options: NetworkProxyOptions): string | undefined {

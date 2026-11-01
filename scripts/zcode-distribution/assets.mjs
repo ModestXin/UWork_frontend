@@ -6,6 +6,7 @@ import {
   seaTuiAssetPrefix,
 } from "../../apps/zcode-cli/packages/cli/scripts/sea-tui-assets.mjs";
 import { supportedTargets } from "../../apps/zcode-cli/packages/cli/scripts/sea-targets.mjs";
+import { resolveNodePtyPrebuildAssets } from "../node-pty-prebuild-assets.mjs";
 const root = resolve(import.meta.dirname, "../..");
 const readJson = async (file) => JSON.parse(await readFile(file, "utf8"));
 
@@ -176,33 +177,28 @@ export async function copyRuntimeNodeModules(packageRoot) {
 
 export async function patchNodePtyPrebuilds(packageRoot) {
   const requireFromServer = createRequire(resolve(root, "packages", "server", "package.json"));
-  const nodePtyPrebuildRoot = resolve(packageRoot, "node_modules", "node-pty", "prebuilds");
-
+  const nodePtyRoot = resolve(packageRoot, "node_modules", "node-pty");
+  // 全组先验证再写入；不能把旧Beta缓存或缺失的flat1.1布局当作成功。
+  const plans = [];
   for (const packageName of lydellNodePtyPackages) {
-    let packageJsonPath;
-    try {
-      packageJsonPath = await resolvePackageJsonPath(requireFromServer, packageName);
-    } catch {
-      console.warn(`[zcode] ${packageName} is unavailable; skipping node-pty prebuild patch`);
-      continue;
-    }
-    const sourcePrebuildRoot = resolve(dirname(packageJsonPath), "prebuilds");
-    const sourceStat = await stat(sourcePrebuildRoot).catch(() => null);
-    if (!sourceStat?.isDirectory()) {
-      continue;
-    }
-    await cp(sourcePrebuildRoot, nodePtyPrebuildRoot, {
-      dereference: true,
-      force: true,
-      recursive: true,
-    });
+    const packageJsonPath = await resolvePackageJsonPath(requireFromServer, packageName);
+    const platformKey = packageName.slice("@lydell/node-pty-".length);
+    plans.push(
+      resolveNodePtyPrebuildAssets({
+        jsPackageRoot: nodePtyRoot,
+        nativePackageRoot: dirname(packageJsonPath),
+        platformKey,
+      }),
+    );
   }
-
-  for (const helper of [
-    resolve(nodePtyPrebuildRoot, "darwin-arm64", "spawn-helper"),
-    resolve(nodePtyPrebuildRoot, "darwin-x64", "spawn-helper"),
-  ]) {
-    if (await pathExists(helper)) {
+  for (const plan of plans) {
+    const destination = resolve(nodePtyRoot, "prebuilds", plan.platformKey);
+    await rm(destination, { recursive: true, force: true });
+    await mkdir(destination, { recursive: true });
+    await cp(plan.nativePath, resolve(destination, "pty.node"));
+    if (plan.spawnHelperPath) {
+      const helper = resolve(destination, "spawn-helper");
+      await cp(plan.spawnHelperPath, helper);
       await chmod(helper, 0o755);
     }
   }

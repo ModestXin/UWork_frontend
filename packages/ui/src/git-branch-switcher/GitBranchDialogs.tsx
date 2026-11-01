@@ -200,7 +200,8 @@ export function GitBranchSwitchAssistDialog({
                       id: "git.branchSwitcher.commitDialog.changesValue",
                     },
                     {
-                      count: numberFormatter.format(state.fileCount),
+                      // 覆盖警告只计实际列出的受影响文件；全部改动总数属于后续提交预览。
+                      count: numberFormatter.format(state.affectedFiles.length),
                     },
                   )}
                 </div>

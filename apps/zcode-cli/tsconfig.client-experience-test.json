@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.test.json",
+  "include": [
+    "packages/core/test/turn-presentation.test.ts",
+    "packages/bootstrap/src/zcode-protocol-entrypoint.ts",
+    "packages/bootstrap/src/zcode-protocol/server-operations.ts",
+    "packages/bootstrap/src/app/create-app.ts"
+  ]
+}

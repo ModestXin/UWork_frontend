@@ -111,7 +111,27 @@ export class ZhipuAccountAccessConfig extends ConfigOverlay<ZhipuAccountAccessCo
   }
 }
 
-export type ProviderAccessConfig = ApiKeyAccessConfig | ZhipuAccountAccessConfig;
+/** 企业会话由 Host 私有持有；配置只声明访问方式，不复制任何凭据。 */
+export class EnterpriseSessionAccessConfig extends ConfigOverlay<EnterpriseSessionAccessConfig> {
+  readonly type = "enterprise-session" as const;
+  constructor() {
+    super();
+    Object.freeze(this);
+  }
+  overlay(_next: EnterpriseSessionAccessConfig): EnterpriseSessionAccessConfig {
+    return this;
+  }
+  validateComplete(): readonly ConfigValidationIssue[] {
+    return [];
+  }
+  toJSON(): { readonly type: "enterprise-session" } {
+    return { type: this.type };
+  }
+}
+export type ProviderAccessConfig =
+  | ApiKeyAccessConfig
+  | ZhipuAccountAccessConfig
+  | EnterpriseSessionAccessConfig;
 
 export type ProviderAccessConfigObject = Readonly<z.infer<typeof providerAccessDataSchema>>;
 
@@ -177,6 +197,8 @@ export class ProviderConfig extends ConfigOverlay<ProviderConfig> {
   readonly api?: ProviderApiConfig | null;
   readonly builtinModelIds?: ProviderConfigObject["builtinModelIds"];
   readonly personalModelIds?: ProviderConfigObject["personalModelIds"];
+  readonly enterpriseModelIds?: ProviderConfigObject["enterpriseModelIds"];
+  readonly enterpriseModelNames?: ProviderConfigObject["enterpriseModelNames"];
   readonly modelOrder?: ProviderConfigObject["modelOrder"];
   readonly visibility?: ProviderConfigObject["visibility"];
 
@@ -188,6 +210,10 @@ export class ProviderConfig extends ConfigOverlay<ProviderConfig> {
     this.api = input.api;
     this.builtinModelIds = freezeModelIds(input.builtinModelIds);
     this.personalModelIds = freezeModelIds(input.personalModelIds);
+    this.enterpriseModelIds = freezeModelIds(input.enterpriseModelIds);
+    this.enterpriseModelNames = input.enterpriseModelNames
+      ? Object.freeze({ ...input.enterpriseModelNames })
+      : input.enterpriseModelNames;
     this.modelOrder = freezeModelIds(input.modelOrder);
     this.visibility = input.visibility;
     Object.freeze(this);
@@ -201,6 +227,8 @@ export class ProviderConfig extends ConfigOverlay<ProviderConfig> {
       api: this.overlayConfig(this.api, next.api),
       builtinModelIds: this.overlayValue(this.builtinModelIds, next.builtinModelIds),
       personalModelIds: this.overlayValue(this.personalModelIds, next.personalModelIds),
+      enterpriseModelIds: this.overlayValue(this.enterpriseModelIds, next.enterpriseModelIds),
+      enterpriseModelNames: this.overlayValue(this.enterpriseModelNames, next.enterpriseModelNames),
       modelOrder: this.overlayValue(this.modelOrder, next.modelOrder),
       visibility: this.overlayValue(this.visibility, next.visibility),
     });
@@ -225,6 +253,8 @@ export class ProviderConfig extends ConfigOverlay<ProviderConfig> {
       api: this.api,
       builtinModelIds: this.builtinModelIds,
       personalModelIds: this.personalModelIds,
+      enterpriseModelIds: this.enterpriseModelIds,
+      enterpriseModelNames: this.enterpriseModelNames,
       modelOrder: this.modelOrder,
       visibility: this.visibility,
     });
@@ -239,6 +269,8 @@ export class ProviderConfig extends ConfigOverlay<ProviderConfig> {
       api: this.api,
       builtinModelIds: source?.builtinModelIds,
       personalModelIds: source?.personalModelIds,
+      enterpriseModelIds: source?.enterpriseModelIds,
+      enterpriseModelNames: source?.enterpriseModelNames,
       modelOrder: source?.modelOrder,
       visibility: this.visibility,
     });
@@ -257,6 +289,8 @@ export class ProviderConfig extends ConfigOverlay<ProviderConfig> {
       api: this.api?.toJSON() ?? this.api,
       builtinModelIds: this.builtinModelIds,
       personalModelIds: this.personalModelIds,
+      enterpriseModelIds: this.enterpriseModelIds,
+      enterpriseModelNames: this.enterpriseModelNames,
       modelOrder: this.modelOrder,
       visibility: this.visibility,
     });
@@ -505,6 +539,8 @@ function overlayProviderAccess(
       return current.overlay(next as ApiKeyAccessConfig);
     case "zhipu-account":
       return current.overlay(next as ZhipuAccountAccessConfig);
+    case "enterprise-session":
+      return current.overlay(next as EnterpriseSessionAccessConfig);
   }
 }
 

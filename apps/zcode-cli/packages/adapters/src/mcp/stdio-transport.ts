@@ -30,6 +30,7 @@ type ProcessTreeStdioServerParameters = StdioServerParameters & {
    * 为 modern probe 克隆 sibling transport 时，`server/discover` 与正式 session 使用同一注入边界。
    */
   requestMetaProvider?: StdioRequestMetaProvider;
+  beforeDispatch?: () => Promise<void>;
 };
 
 export interface ProcessTreeStdioClientTransportOptions {
@@ -48,6 +49,7 @@ export class ProcessTreeStdioClientTransport extends StdioClientTransport {
   private childProcess?: ChildProcess;
   private lastProcessExit?: StdioProcessExitInfo;
   private readonly requestMetaProvider?: StdioRequestMetaProvider;
+  private readonly beforeDispatch?: () => Promise<void>;
   private readonly windowsJobObjectFactory: (
     pid: number,
   ) => Promise<WindowsJobObjectController | undefined>;
@@ -59,6 +61,7 @@ export class ProcessTreeStdioClientTransport extends StdioClientTransport {
   ) {
     super(server);
     this.requestMetaProvider = server.requestMetaProvider;
+    this.beforeDispatch = server.beforeDispatch;
     this.windowsJobObjectFactory =
       options.windowsJobObjectFactory ?? attachProcessToWindowsJobObject;
   }
@@ -82,11 +85,13 @@ export class ProcessTreeStdioClientTransport extends StdioClientTransport {
 
   override async send(message: JSONRPCMessage): Promise<void> {
     const requestMeta = await this.requestMetaProvider?.();
+    await this.beforeDispatch?.();
     await super.send(mergeRequestMeta(message, requestMeta));
   }
 
   override async start(): Promise<void> {
     const startedAt = Date.now();
+    await this.beforeDispatch?.();
     await super.start();
     const child = (this as unknown as { _process?: ChildProcess })._process;
     if (!child) return;

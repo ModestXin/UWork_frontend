@@ -87,8 +87,7 @@ export interface HttpClientRunOptions {
 }
 
 export interface HttpClientPort {
-  request(
-    request: HttpClientRequest,
-    options?: HttpClientRunOptions,
-  ): Promise<HttpClientResponse>;
+  /** Set only by a trusted adapter that authorizes every manual HTTP hop. */
+  readonly enterpriseNetworkGuarded?: true;
+  request(request: HttpClientRequest, options?: HttpClientRunOptions): Promise<HttpClientResponse>;
 }

@@ -43,6 +43,10 @@ import {
 import { mirrorSubagentToolEvent } from "../../subagent/tool-event-mirror.js";
 import { isBuiltInExploreAgentProfile } from "../../subagent/profile.js";
 import {
+  authorizePersonalAgentProfile,
+  withPersonalAgentModelAuthorization,
+} from "../../subagent/enterprise-profile-authorization.js";
+import {
   buildSubagentChildDisallowRules,
   filterSubagentChildToolNames,
 } from "../../subagent/tool-policy.js";
@@ -78,6 +82,9 @@ export function createDefaultSubagentPort(
     autoBackgroundMs: this.config.subagents?.autoBackgroundMs,
     outputRootDir: this.config.subagents?.outputRootDir,
     getAgentDefinitions: this.getAgentDefinitions,
+    // 真实运行时的 definitions 由 config.profiles 派生；部分运行时（测试/嵌入宿主）没有
+    // definitions owner 时退回到同一份配置，避免个人/企业 profile 静默消失。
+    profiles: this.config.subagents?.profiles,
     builtInModelSelectionOverrides: this.config.subagents?.builtInModelSelectionOverrides,
     runtimeTaskRegistry: this.runtimeTaskRegistry,
     emitParentEvent: async (event, traceContext) => {
@@ -99,6 +106,20 @@ export function createDefaultSubagentPort(
       });
     },
     runExploreAgent: async (request, options) => {
+      request.reportActivity?.();
+      const personalAuthorization = {
+        authorization: this.permissionService.enterpriseAuthorization,
+        profile: { name: request.profile.name, source: request.profile.source },
+        sessionId: this.sessionId,
+        workspacePath: request.workspaceRoot,
+        workspaceIdentity: this.config.memory?.workspaceIdentity,
+        workingDirectory: request.workingDirectory,
+        traceContext: request.traceContext,
+        signal: options?.signal,
+      };
+      // 解析后的 user/project 目标可能来自 fuzzy 或 resume；必须先准入，
+      // 再读取个人 prompt/memory/MCP，不能依赖最初加载 profile 时的旧许可。
+      const personalAdmission = await authorizePersonalAgentProfile(personalAuthorization);
       const offPeak = getOffPeakExecution(this);
       const childBinding = offPeak?.createChildBinding();
       if (offPeak && !offPeak.lifecycle.terminal) {
@@ -116,7 +137,6 @@ export function createDefaultSubagentPort(
           };
       }
       try {
-        request.reportActivity?.();
         const builtInExplore = isBuiltInExploreAgentProfile(request.profile);
         const agentsMdInstructions =
           request.profile.injectAgentsMd !== false
@@ -220,13 +240,21 @@ export function createDefaultSubagentPort(
             { recoverable: true },
           );
         }
-        const childModel = baseChildModelFactory({ selection: childSelection });
+        const guardChildModel = (model: Model) =>
+          withPersonalAgentModelAuthorization(model, {
+            ...personalAuthorization,
+            expectedOwnerKey: personalAdmission?.ownerKey,
+            expectedManaged: personalAdmission
+              ? personalAdmission.code !== "not_managed"
+              : undefined,
+          });
+        const childModel = guardChildModel(baseChildModelFactory({ selection: childSelection }));
         const childModelFactory: NonNullable<AgentRuntimeDeps["modelFactory"]> = (target) =>
           target.selection.providerId === childSelection.providerId &&
           target.selection.modelId === childSelection.modelId &&
           target.selection.options?.reasoningLevel === childSelection.options?.reasoningLevel
             ? childModel
-            : baseChildModelFactory(target);
+            : guardChildModel(baseChildModelFactory(target));
         const parentToolCallId = traceStringAttribute(request.traceContext, "parentToolCallId");
         // 对外交互端口（permission broker + provider runtime headers）：与 dwf actor、legacy
         // workflow child 共用同一条派生，路由身份统一落到本 runtime 的会话。
@@ -358,7 +386,10 @@ export function createDefaultSubagentPort(
             }),
             // Explore 使用独立只读权限配置；general-purpose 和自定义 agent 继承父权限服务。
             permissionService: builtInExplore
-              ? new PermissionService(defaultPermissionConfig)
+              ? new PermissionService(
+                  defaultPermissionConfig,
+                  this.permissionService.enterpriseAuthorization,
+                )
               : this.permissionService,
             toolScheduler: deps.toolScheduler ?? defaultScheduler,
             executionPort: deps.executionPort,
@@ -829,6 +860,9 @@ function resolveSubagentSkillPort(
 }
 
 class FilteredSkillPort implements SkillPort {
+  get enterpriseAssetGuarded() {
+    return this.parent.enterpriseAssetGuarded === true;
+  }
   constructor(
     private readonly parent: SkillPort,
     private readonly allowedSkills: ReadonlySet<string> | undefined,

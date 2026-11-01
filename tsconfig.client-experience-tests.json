@@ -1,0 +1,35 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "strict": true,
+    "composite": false,
+    "incremental": false,
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "disableSourceOfProjectReferenceRedirect": true,
+    "types": ["node"],
+    "paths": { "@/*": ["./packages/ui/src/*"] },
+    "lib": ["es2025", "dom", "dom.iterable"],
+    "jsx": "react-jsx"
+  },
+  "include": [
+    "packages/services/test/enterpriseClientExperience.test.ts",
+    "packages/services/test/clientExperienceFacades.test.ts",
+    "packages/services/test/clientPresentationOwnership.test.ts",
+    "packages/services/test/enterpriseFeedbackBoundary.test.ts",
+    "packages/desktop/test/remoteWorkspaceServiceLifecycle.test.ts",
+    "packages/shared/test/uworkClientExperience.test.ts",
+    "packages/ui/test/clientExperienceScope.test.ts",
+    "packages/ui/test/publishedSuggestedPlugins.test.ts",
+    "packages/ui/test/enterpriseFeedbackEntry.test.ts",
+    "packages/ui/test/client-presentation/main.tsx",
+    "packages/ui/src/css.d.ts"
+  ],
+  "references": [
+    { "path": "packages/shared" },
+    { "path": "packages/rpc" },
+    { "path": "packages/services" },
+    { "path": "packages/ui" }
+  ]
+}

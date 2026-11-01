@@ -2,10 +2,12 @@ import { z } from "zod";
 import { modelSelectionSchema, type ModelSelection } from "./model-selection.js";
 import type { AgentPermissionMode } from "./subagents-types.js";
 
-export type AgentProfileSource = "built-in" | "project" | "user";
+export type AgentProfileSource = "built-in" | "project" | "user" | "enterprise";
 export type AgentMemoryScope = "user" | "project" | "local";
 
 export interface AgentProfile {
+  /** 受管来源限定选择名不参与模糊别名匹配，避免旧企业名字变成个人选择。 */
+  exactSelection?: boolean;
   background?: boolean;
   color?: "red" | "blue" | "green" | "yellow" | "purple" | "orange" | "pink" | "cyan";
   description: string;
@@ -40,7 +42,8 @@ export const agentProfileSchema = z
   .object({
     name: z.string().min(1),
     description: z.string(),
-    source: z.enum(["built-in", "project", "user"]),
+    source: z.enum(["built-in", "project", "user", "enterprise"]),
+    exactSelection: z.boolean().optional(),
     systemPrompt: z.string(),
     path: z.string().optional(),
     modelSelection: modelSelectionSchema.optional(),

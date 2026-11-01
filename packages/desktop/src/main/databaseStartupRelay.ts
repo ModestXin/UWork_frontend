@@ -41,8 +41,12 @@ export function bindDatabaseStartupRelay(
   let latest: DatabaseStartupState | undefined;
   let exited = false;
   const forward = (state: DatabaseStartupState) => {
-    if (!disposed && !win.isDestroyed() && !win.webContents.isDestroyed())
-      win.webContents.send(InternalChannels.DatabaseStartupState, state);
+    if (disposed || win.isDestroyed() || win.webContents.isDestroyed()) return;
+    // 真实关闭联测中主帧先于 WebContents 销毁；仅检查窗口会向已退休帧发送。
+    // latest 仍由 applyState 保存，reload 后原 snapshot 可以取回 Host 的最终状态。
+    const frame = win.webContents.mainFrame;
+    if (frame.isDestroyed() || frame.detached) return;
+    win.webContents.send(InternalChannels.DatabaseStartupState, state);
   };
   const applyState = (state: DatabaseStartupState) => {
     if (latest && state.startupId === latest.startupId && state.sequence <= latest.sequence) return;

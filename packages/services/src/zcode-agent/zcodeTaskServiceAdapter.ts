@@ -1644,6 +1644,7 @@ export function createZCodeTaskServiceAdapter(
   }
 
   let disposed = false;
+  let disposal: Promise<void> | undefined;
 
   function handleTaskIndexTerminalEvent(event: ZCodeTaskIndexTerminalEvent): void {
     const params: TaskTarget = {
@@ -3177,18 +3178,23 @@ export function createZCodeTaskServiceAdapter(
       disposeLocalTaskState();
     },
 
-    async disposeAllAndWait(): Promise<void> {
-      if (disposed) {
-        return;
-      }
+    disposeAllAndWait(): Promise<void> {
+      if (disposal) return disposal;
+      if (disposed) return Promise.resolve();
       disposed = true;
+      memoryDiagnostics.dispose();
       // app 退出必须先断开 task index syncer 的订阅，再等待 agent 进程树完成清理；
       // 否则 host 退出时会把 zcode-cli 的 SIGKILL 兜底 timer 一起带走。
-      taskIndexSyncer.disposeAll();
-      await Promise.all([...botConnectionScopes.values()].map((scope) => scope.dispose()));
-      botConnectionScopes.clear();
-      await disposeZCodeAgentServiceAndWait();
-      disposeLocalTaskState();
+      // syncer 的同步释放只发起退订；必须等迟到 ACK 和退订真正完成再销毁协议。
+      // 重复关闭也等待同一屏障，不能在第一次清理尚未结束时提前报告完成。
+      disposal = (async () => {
+        await taskIndexSyncer.disposeAllAndWait();
+        await Promise.all([...botConnectionScopes.values()].map((scope) => scope.dispose()));
+        botConnectionScopes.clear();
+        await disposeZCodeAgentServiceAndWait();
+        disposeLocalTaskState();
+      })();
+      return disposal;
     },
   };
 

@@ -399,3 +399,23 @@ export function getAskUserQuestionAnswerText(
   }
   return String(value);
 }
+
+/** 旧自然语言历史无法可靠还原答案，不能把缺少结构误报成用户没有回答。 */
+export function getAskUserQuestionMissingAnswerMessageId(
+  answers: ZCodeUserQuestionAnswers | undefined,
+) {
+  if (answers === undefined) return "chat.askQuestion.answerUnavailable";
+  return Object.keys(answers).length === 0
+    ? "chat.askQuestion.autoContinued"
+    : "chat.askQuestion.noAnswerProvided";
+}
+
+/** 保留旧摘要供用户直接阅读；不从带引号/换行的人类文本猜答案字段。 */
+export function getAskUserQuestionRetainedSummary(
+  output: unknown,
+  answers: ZCodeUserQuestionAnswers | undefined,
+) {
+  return answers === undefined && typeof output === "string" && output.trim().length > 0
+    ? output
+    : undefined;
+}

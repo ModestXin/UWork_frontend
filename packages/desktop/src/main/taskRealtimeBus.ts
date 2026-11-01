@@ -4,15 +4,15 @@ import {
   type TaskOwnerCommandDelivery,
   type TaskOwnerCommandRequest,
   type TaskOwnerCommandResult,
-  type TaskRealtimeDeliveredEvent,
-  type TaskRealtimeEvent,
+  type TaskRealtimeWireDeliveredEvent,
+  type TaskRealtimeWireEvent,
   type TaskRealtimeHostDeliveryKind,
   type TaskRunLeaseAcquireRequest,
   type TaskRunLeaseResult,
   type TaskRunLeaseTarget,
-  type TaskStreamMirrorBatchEvent,
-  type TaskStreamMirrorOp,
-  type TaskStreamMirrorPublishOp,
+  type TaskStreamMirrorWireBatchEvent,
+  type TaskStreamMirrorWireOp,
+  type TaskStreamMirrorWirePublishOp,
   type TaskStreamWatermark,
   formatZodError,
   HostMessageTypes,
@@ -70,8 +70,8 @@ interface PendingStreamBatch {
   ownerHostId: string;
   nextBatchSeq: number;
   nextOpSeq: number;
-  pendingOps: TaskStreamMirrorPublishOp[];
-  replay: TaskStreamMirrorBatchEvent[];
+  pendingOps: TaskStreamMirrorWirePublishOp[];
+  replay: TaskStreamMirrorWireBatchEvent[];
   replayUnavailable: boolean;
   timer: ReturnType<typeof setTimeout> | null;
   replayInitializedHostIds: Set<string>;
@@ -248,7 +248,7 @@ export class TaskRealtimeBus {
 
     switch (parsed.data.type) {
       case HostResponseTypes.TaskRealtimePublish:
-        this.handleRealtimePublish(origin, parsed.data.event as TaskRealtimeEvent);
+        this.handleRealtimePublish(origin, parsed.data.event as TaskRealtimeWireEvent);
         break;
       case HostResponseTypes.TaskRunLeaseAcquire:
         this.handleLeaseAcquire(origin, parsed.data.request);
@@ -260,7 +260,7 @@ export class TaskRealtimeBus {
         this.handleStreamOpPublish(
           origin,
           parsed.data.target,
-          parsed.data.op as TaskStreamMirrorPublishOp,
+          parsed.data.op as TaskStreamMirrorWirePublishOp,
         );
         break;
       case HostResponseTypes.TaskOwnerCommandRequest:
@@ -292,7 +292,10 @@ export class TaskRealtimeBus {
     this.sessionRoutes.set(route.sessionId, origin.hostId);
   }
 
-  private handleRealtimePublish(origin: RegisteredRealtimeHost, event: TaskRealtimeEvent): void {
+  private handleRealtimePublish(
+    origin: RegisteredRealtimeHost,
+    event: TaskRealtimeWireEvent,
+  ): void {
     if (!this.rememberEventId(event.eventId)) {
       return;
     }
@@ -395,7 +398,7 @@ export class TaskRealtimeBus {
   private handleStreamOpPublish(
     origin: RegisteredRealtimeHost,
     target: TaskRunLeaseTarget,
-    op: TaskStreamMirrorPublishOp,
+    op: TaskStreamMirrorWirePublishOp,
   ): void {
     const lease = this.leases.get(this.getLeaseKey(target.workspaceKey, target.taskId));
     if (!lease || lease.ownerHostId !== origin.hostId || lease.runId !== target.runId) {
@@ -454,7 +457,7 @@ export class TaskRealtimeBus {
     return batch;
   }
 
-  private flushMatchingStreamBatchBeforeInvalidation(event: TaskRealtimeEvent): void {
+  private flushMatchingStreamBatchBeforeInvalidation(event: TaskRealtimeWireEvent): void {
     if (
       event.type === "task_stream_mirror_batch" ||
       !("taskId" in event) ||
@@ -483,11 +486,11 @@ export class TaskRealtimeBus {
 
     const coalesced = this.splitLargeTextOps(this.coalesceOps(batch.pendingOps));
     batch.pendingOps = [];
-    const ops: TaskStreamMirrorOp[] = coalesced.map((op) => ({
+    const ops: TaskStreamMirrorWireOp[] = coalesced.map((op) => ({
       ...op,
       seq: batch.nextOpSeq++,
     }));
-    const event: TaskStreamMirrorBatchEvent = {
+    const event: TaskStreamMirrorWireBatchEvent = {
       type: "task_stream_mirror_batch",
       eventId: `stream-${batch.workspaceKey}-${batch.taskId}-${batch.runId}-${batch.nextBatchSeq}`,
       workspacePath: batch.workspacePath,
@@ -524,7 +527,7 @@ export class TaskRealtimeBus {
 
   private deliverOversizedStreamBatchFallback(
     batch: PendingStreamBatch,
-    event: TaskStreamMirrorBatchEvent,
+    event: TaskStreamMirrorWireBatchEvent,
   ): void {
     // 不能丢弃 owner 的 mirror seq。ZCode Agent 有 realtime port 时 owner direct stream 会被关闭，
     // 如果 oversized batch 只发 gap，service 会因为后续 seq 缺口禁用 mirror，桌面端就停到终态快照。
@@ -548,15 +551,15 @@ export class TaskRealtimeBus {
 
   private splitOversizedBatchForOwner(
     batch: PendingStreamBatch,
-    event: TaskStreamMirrorBatchEvent,
-  ): TaskStreamMirrorBatchEvent[] {
-    const chunks: TaskStreamMirrorBatchEvent[] = [];
-    let pendingOps: TaskStreamMirrorOp[] = [];
+    event: TaskStreamMirrorWireBatchEvent,
+  ): TaskStreamMirrorWireBatchEvent[] {
+    const chunks: TaskStreamMirrorWireBatchEvent[] = [];
+    let pendingOps: TaskStreamMirrorWireOp[] = [];
 
     const createChunk = (
-      ops: TaskStreamMirrorOp[],
+      ops: TaskStreamMirrorWireOp[],
       batchSeq: number,
-    ): TaskStreamMirrorBatchEvent => ({
+    ): TaskStreamMirrorWireBatchEvent => ({
       ...event,
       eventId: `stream-${batch.workspaceKey}-${batch.taskId}-${batch.runId}-${batchSeq}`,
       batchSeq,
@@ -591,12 +594,12 @@ export class TaskRealtimeBus {
     return chunks;
   }
 
-  private coalesceOps(ops: TaskStreamMirrorPublishOp[]): TaskStreamMirrorPublishOp[] {
-    const coalesced: TaskStreamMirrorPublishOp[] = [];
+  private coalesceOps(ops: TaskStreamMirrorWirePublishOp[]): TaskStreamMirrorWirePublishOp[] {
+    const coalesced: TaskStreamMirrorWirePublishOp[] = [];
     for (const op of ops) {
       const previous = coalesced[coalesced.length - 1];
       if (this.canMergeTextChunk(previous, op)) {
-        const current = op as Extract<TaskStreamMirrorPublishOp, { kind: "stream_event" }> & {
+        const current = op as Extract<TaskStreamMirrorWirePublishOp, { kind: "stream_event" }> & {
           event: { content: string };
         };
         coalesced[coalesced.length - 1] = {
@@ -623,12 +626,13 @@ export class TaskRealtimeBus {
     return coalesced;
   }
 
-  private splitLargeTextOps(ops: TaskStreamMirrorPublishOp[]): TaskStreamMirrorPublishOp[] {
-    const splitOps: TaskStreamMirrorPublishOp[] = [];
+  private splitLargeTextOps(ops: TaskStreamMirrorWirePublishOp[]): TaskStreamMirrorWirePublishOp[] {
+    const splitOps: TaskStreamMirrorWirePublishOp[] = [];
     for (const op of ops) {
       if (
         op.kind !== "stream_event" ||
         (op.event.type !== "agent_message_chunk" && op.event.type !== "agent_thought_chunk") ||
+        typeof op.event.content !== "string" ||
         op.event.content.length <= STREAM_MIRROR_TEXT_OP_MAX_CHARS
       ) {
         splitOps.push(op);
@@ -655,9 +659,9 @@ export class TaskRealtimeBus {
   }
 
   private canMergeTextChunk(
-    previous: TaskStreamMirrorPublishOp | undefined,
-    op: TaskStreamMirrorPublishOp,
-  ): previous is Extract<TaskStreamMirrorPublishOp, { kind: "stream_event" }> & {
+    previous: TaskStreamMirrorWirePublishOp | undefined,
+    op: TaskStreamMirrorWirePublishOp,
+  ): previous is Extract<TaskStreamMirrorWirePublishOp, { kind: "stream_event" }> & {
     event: {
       type: "agent_message_chunk" | "agent_thought_chunk";
       taskId: string;
@@ -687,14 +691,17 @@ export class TaskRealtimeBus {
     return type === "task_complete" || type === "task_error";
   }
 
-  private isTerminalOrImmediateOp(op: TaskStreamMirrorPublishOp): boolean {
+  private isTerminalOrImmediateOp(op: TaskStreamMirrorWirePublishOp): boolean {
     return (
       op.kind === "stream_event" &&
       (op.event.type === "permission_request" || this.isTerminalEventType(op.event.type))
     );
   }
 
-  private deliverStreamBatch(batch: PendingStreamBatch, event: TaskStreamMirrorBatchEvent): void {
+  private deliverStreamBatch(
+    batch: PendingStreamBatch,
+    event: TaskStreamMirrorWireBatchEvent,
+  ): void {
     for (const target of this.hosts.values()) {
       if (!target.workspaceKeys.has(batch.workspaceKey)) {
         continue;
@@ -708,7 +715,7 @@ export class TaskRealtimeBus {
           // observer 走 mirror batch。切换 task 或跨端 relay 时两边会因为事件丢失/乱序产生分叉。
           // 这里统一把 mirror batch 回投给 owner，让所有 renderer 都按同一条 seq 流更新 task store。
           deliveryPurpose: target.hostId === batch.ownerHostId ? "relay_owner" : "observer",
-        } satisfies TaskRealtimeDeliveredEvent,
+        } satisfies TaskRealtimeWireDeliveredEvent,
       });
     }
   }
@@ -716,7 +723,7 @@ export class TaskRealtimeBus {
   private deliverStreamBatchToHost(
     hostId: string,
     batch: PendingStreamBatch,
-    event: TaskStreamMirrorBatchEvent,
+    event: TaskStreamMirrorWireBatchEvent,
     deliveryPurpose: "relay_owner" | "observer",
   ): void {
     const target = this.hosts.get(hostId);
@@ -729,11 +736,14 @@ export class TaskRealtimeBus {
         ...event,
         originHostId: batch.ownerHostId,
         deliveryPurpose,
-      } satisfies TaskRealtimeDeliveredEvent,
+      } satisfies TaskRealtimeWireDeliveredEvent,
     });
   }
 
-  private rememberReplayBatch(batch: PendingStreamBatch, event: TaskStreamMirrorBatchEvent): void {
+  private rememberReplayBatch(
+    batch: PendingStreamBatch,
+    event: TaskStreamMirrorWireBatchEvent,
+  ): void {
     // 无上限 replay 在长任务中会线性占用主进程内存。
     // 这里恢复批次数+字节数双阈值，超限后由 replayVisibleRunsToHost 触发 stream_mirror_gap 并走快照补齐。
     batch.replay.push(event);
@@ -745,7 +755,7 @@ export class TaskRealtimeBus {
     }
   }
 
-  private replayBytes(replay: TaskStreamMirrorBatchEvent[]): number {
+  private replayBytes(replay: TaskStreamMirrorWireBatchEvent[]): number {
     return replay.reduce((total, replayEvent) => total + JSON.stringify(replayEvent).length, 0);
   }
 
@@ -833,7 +843,7 @@ export class TaskRealtimeBus {
   }
 
   private deliverRealtimeEvent(
-    delivered: TaskRealtimeDeliveredEvent,
+    delivered: TaskRealtimeWireDeliveredEvent,
     shouldDeliver: (target: RegisteredRealtimeHost) => boolean,
   ): void {
     for (const target of this.hosts.values()) {

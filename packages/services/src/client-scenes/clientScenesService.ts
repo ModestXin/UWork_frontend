@@ -1,15 +1,18 @@
-import type { ApiClient } from "@zcode/shared";
-import { readApiJson } from "../providers/api/apiJson.js";
-import { ZCODE_CLIENT_SCENES_URL } from "../providers/api/apiEndpoints.js";
-import type { ClientScenesResponse, IClientScenesService } from "./clientScenes.js";
+import type { UWorkClientPresentation } from "@zcode/shared";
+import type { IClientScenesService } from "./clientScenes.js";
+import { projectClientScenes } from "./clientSceneProjection.js";
 
 export function createClientScenesService(dependencies: {
-  apiClient: ApiClient;
+  readClientPresentation: () => Promise<UWorkClientPresentation>;
 }): IClientScenesService {
   return {
-    list: () =>
-      readApiJson<ClientScenesResponse>(dependencies.apiClient, ZCODE_CLIENT_SCENES_URL, {
-        method: "GET",
-      }),
+    async list() {
+      const view = await dependencies.readClientPresentation();
+      if (view.status === "unmanaged") return { code: 0, msg: "unmanaged", data: [] };
+      if (view.status !== "ready") throw new Error("enterprise_client_scenes_unavailable");
+      const feature = view.scenes;
+      if (feature.status !== "ready") throw new Error(`enterprise_client_scenes_${feature.status}`);
+      return { code: 0, msg: "success", data: projectClientScenes(feature.data) };
+    },
   };
 }

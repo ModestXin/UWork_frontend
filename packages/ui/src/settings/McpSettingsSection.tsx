@@ -441,7 +441,7 @@ function PluginMcpServerList({
     }
     if (item.status === "error") {
       return intl.formatMessage({
-        id: resolveMcpFailureMessageId(item.failureKind),
+        id: resolveMcpFailureMessageId(item.failureKind, item.error),
       });
     }
     if (item.active) {

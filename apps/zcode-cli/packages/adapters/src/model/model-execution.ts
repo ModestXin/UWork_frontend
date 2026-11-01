@@ -51,11 +51,13 @@ interface AiSdkProviderConfig {
 }
 
 export interface AiSdkModelExecutionConfig {
+  enterpriseSessionFetch?: ProviderFetch;
   /** 执行环境提供的默认来源信息，不属于 Provider 持久化配置。 */
   defaultHeaders?: Readonly<Record<string, string>>;
   endpointRoutingPort?: ProviderEndpointRoutingPort;
   env?: EnvRecord;
   network?: AiSdkNetworkConfig;
+  beforeDispatch?: (url: string, signal?: AbortSignal | null) => Promise<boolean>;
 }
 
 export interface AiSdkModelExecutionOptions {
@@ -170,6 +172,8 @@ export class AiSdkModelExecution {
   private readonly endpointRoutingPort?: ProviderEndpointRoutingPort;
   private readonly logger?: Logger;
   private readonly baseTransport?: ProviderFetch;
+  private readonly enterpriseSessionFetch?: ProviderFetch;
+  private readonly beforeDispatch?: AiSdkModelExecutionConfig["beforeDispatch"];
   private readonly providerTransports = new Map<string, ProviderFetch>();
   private readonly requestSecurity: ModelRequestSecurityPort;
 
@@ -183,6 +187,8 @@ export class AiSdkModelExecution {
     this.requestSecurity = (
       options.requestSecurityState ?? createModelRequestSecurityState()
     ).createExecution({ logger: options.logger });
+    this.enterpriseSessionFetch = config.enterpriseSessionFetch;
+    this.beforeDispatch = config.beforeDispatch;
   }
 
   /**
@@ -217,6 +223,8 @@ export class AiSdkModelExecution {
     readonly providerConfig: RegistryProviderConfig;
     readonly supportsJsonSchemaOutput: boolean;
   }): AiSdkModelSnapshot {
+    if (input.providerConfig.access.type === "enterprise-session" && !this.enterpriseSessionFetch)
+      throw new Error("enterprise_model_relay_unavailable");
     const configuredProvider = toAiSdkProviderConfig(input.providerId, input.providerConfig);
     // 重构后模型 SDK 曾只接到用户 Header，漏掉版本和站点归因；在公共绑定边界恢复，
     // 不依赖签名成功，不给各业务重复补头，也不修改 Provider 或已绑定 Model 的配置。
@@ -224,6 +232,8 @@ export class AiSdkModelExecution {
       withOpenRouterAttributionHeaders(this.defaultHeaders, configuredProvider.baseURL),
       configuredProvider.headers,
     );
+    if (configuredProvider.access.type === "enterprise-session")
+      configuredProvider.headers = undefined;
     const apiKey = this.resolveApiKey(configuredProvider);
     return {
       providerConfig: {
@@ -283,8 +293,15 @@ export class AiSdkModelExecution {
   ): LanguageModelFactory {
     const apiKey = this.resolveApiKey(providerConfig);
     // SDK 会合并 factory 默认 header；必须在这里去掉静态来源，才能保证缺失时真正省略。
-    const headers = withoutModelQuerySourceHeader(providerConfig.headers);
-    const networkTransport = this.resolveProviderTransport(providerId);
+    const headers =
+      providerConfig.access.type === "enterprise-session"
+        ? undefined
+        : withoutModelQuerySourceHeader(providerConfig.headers);
+    // 企业会话中继自带鉴权与目标地址，直接作为网络传输，不经过按 Provider 缓存的代理传输。
+    const networkTransport =
+      providerConfig.access.type === "enterprise-session"
+        ? this.enterpriseSessionFetch!
+        : this.resolveProviderTransport(providerId);
     // ID 属于当前 attempt，不能放入按 Provider 缓存的 transport，避免切换账号后串用。
     const providerTransport = this.endpointRoutingPort
       ? createProviderEndpointRoutingFetch({
@@ -367,6 +384,7 @@ export class AiSdkModelExecution {
       fetch: this.baseTransport,
       httpProxy: this.network.httpProxy,
       noProxy: this.network.noProxy,
+      beforeDispatch: this.beforeDispatch,
     });
     this.providerTransports.set(providerId, networkTransport);
     return networkTransport;
@@ -385,7 +403,9 @@ function toAiSdkProviderConfig(
   config: RegistryProviderConfig,
 ): AiSdkProviderConfig {
   const common = {
-    ...(config.access.type !== "zhipu-account" && config.access.apiKey
+    ...(config.access.type !== "zhipu-account" &&
+    config.access.type !== "enterprise-session" &&
+    config.access.apiKey
       ? { apiKey: config.access.apiKey }
       : {}),
     baseURL: config.api.baseUrl,
@@ -543,6 +563,7 @@ interface ProviderProxyFetchOptions {
   fetch?: ProviderFetch;
   httpProxy?: string;
   noProxy?: string;
+  beforeDispatch?: AiSdkModelExecutionConfig["beforeDispatch"];
 }
 
 function createProviderProxyFetch(options: ProviderProxyFetchOptions): ProviderFetch {

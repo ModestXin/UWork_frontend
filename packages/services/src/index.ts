@@ -12,6 +12,7 @@ export {
   type ImRealtimeEvent,
   type ImConnectionStatus,
 } from "./im/contract.js";
+export { IEnterpriseConsoleService } from "./enterprise-console/contract.js";
 export { ServiceCollection, type ServiceExposurePolicy } from "./collection.js";
 export {
   IModelSelectionService,

@@ -27,6 +27,7 @@ import { recordDynamicWorkflowRunProgress } from "./dynamic-workflow-run-progres
 import { trackResumedDynamicWorkflowRun } from "./dynamic-workflow-run-track.js";
 import { activateDynamicWorkflowTools } from "./dynamic-workflow-activation.js";
 import { startSavedWorkflowRun } from "./dynamic-workflow-run-start.js";
+import { createWorkflowAdmission } from "./workflow-authorization.js";
 import { amendWorkflowRunSettings } from "./dynamic-workflow-run-settings.js";
 import { getProjection } from "./config.js";
 import { getSessionId } from "./config.js";
@@ -234,6 +235,7 @@ export function installAgentRuntimeMethods(ctor: AgentRuntimeConstructor): void 
   proto.trackResumedDynamicWorkflowRun = trackResumedDynamicWorkflowRun;
   proto.activateDynamicWorkflowTools = activateDynamicWorkflowTools;
   proto.startSavedWorkflowRun = startSavedWorkflowRun;
+  proto.createWorkflowAdmission = createWorkflowAdmission;
   proto.amendWorkflowRunSettings = amendWorkflowRunSettings;
   proto.getProjection = getProjection;
   proto.getSessionId = getSessionId;

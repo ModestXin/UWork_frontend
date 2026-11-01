@@ -15,7 +15,7 @@ import {
 
 type PreflightMeta = Pick<
   ConversationSharePreflightResult,
-  "revision" | "logEpoch" | "capabilitiesFingerprint" | "supportedArtifactTypes"
+  "revision" | "logEpoch" | "capabilitiesFingerprint" | "supportedArtifactTypes" | "accessModes"
 >;
 
 /** 响应只提交到 SessionPane 持有的缓存；请求代际仍由 scheduler 和 isCurrent 共同约束。 */
@@ -82,6 +82,8 @@ export function createConversationSharePreflightResponseHandlers({
         logEpoch: result.logEpoch,
         capabilitiesFingerprint: result.capabilitiesFingerprint,
         supportedArtifactTypes: result.supportedArtifactTypes,
+        // 企业侧可用访问模式由 Host 能力决定；缺失时按空集合处理，由调用方禁用发布。
+        accessModes: result.accessModes ?? [],
       };
       for (const entry of entries) {
         sharePreflightCacheRef.current.set(sharePreflightCacheKey(entry.productTurnId), entry);

@@ -9,6 +9,7 @@ import type {
 import type { ConfigValidationIssue } from "./config-overlay.js";
 import {
   type ApiKeyAccessConfig,
+  type EnterpriseSessionAccessConfig,
   ModelConfig,
   ModelConfigRules,
   type ZhipuAccountAccessConfig,
@@ -27,7 +28,8 @@ export type RegistryZhipuAccountAccessConfig = ZhipuAccountAccessConfig &
 
 export type RegistryProviderAccessConfig =
   | (ApiKeyAccessConfig & z.infer<typeof completeApiKeyAccessDataSchema>)
-  | RegistryZhipuAccountAccessConfig;
+  | RegistryZhipuAccountAccessConfig
+  | EnterpriseSessionAccessConfig;
 
 export type RegistryProviderConfig = ProviderConfig &
   z.infer<typeof completeProviderConfigDataSchema> & {
@@ -43,20 +45,22 @@ export function serializeRegistryProviderConfig(
     group: config.group,
     ...(config.logo === undefined ? {} : { logo: config.logo }),
     access:
-      config.access.type !== "zhipu-account"
-        ? {
-            type: config.access.type,
-            apiKey: config.access.apiKey,
-            ...(config.access.apiKeyManagementUrl === undefined
-              ? {}
-              : { apiKeyManagementUrl: config.access.apiKeyManagementUrl }),
-          }
-        : {
-            type: config.access.type,
-            accountType: config.access.accountType,
-            mode: config.access.mode,
-            entitled: config.access.entitled,
-          },
+      config.access.type === "enterprise-session"
+        ? { type: "enterprise-session" }
+        : config.access.type !== "zhipu-account"
+          ? {
+              type: config.access.type,
+              apiKey: config.access.apiKey,
+              ...(config.access.apiKeyManagementUrl === undefined
+                ? {}
+                : { apiKeyManagementUrl: config.access.apiKeyManagementUrl }),
+            }
+          : {
+              type: config.access.type,
+              accountType: config.access.accountType,
+              mode: config.access.mode,
+              entitled: config.access.entitled,
+            },
     api: {
       type: config.api.type,
       baseUrl: config.api.baseUrl,
@@ -64,6 +68,12 @@ export function serializeRegistryProviderConfig(
     },
     ...(config.builtinModelIds == null ? {} : { builtinModelIds: [...config.builtinModelIds] }),
     ...(config.personalModelIds == null ? {} : { personalModelIds: [...config.personalModelIds] }),
+    ...(config.enterpriseModelIds == null
+      ? {}
+      : { enterpriseModelIds: [...config.enterpriseModelIds] }),
+    ...(config.enterpriseModelNames == null
+      ? {}
+      : { enterpriseModelNames: { ...config.enterpriseModelNames } }),
     ...(config.modelOrder == null ? {} : { modelOrder: [...config.modelOrder] }),
     ...(config.visibility === undefined ? {} : { visibility: config.visibility }),
   };
@@ -253,6 +263,11 @@ export class ProviderConfigResolver {
       const accountCurrent = input.accountStates?.[providerId]?.current !== false;
       const providerExecutable =
         enabled && accessEntitled && accountCurrent && providerIssues.length === 0;
+      // 企业会话只收窄真实候选；原成员/规则保留，后台每次调用仍重新鉴权。
+      const enterpriseCandidates =
+        config.access?.type === "enterprise-session"
+          ? new Set(config.enterpriseModelIds ?? [])
+          : undefined;
       const models = orderedModelIds.map((modelId): ResolvedProviderModel => {
         const modelConfig = effectiveModelRules.resolve({
           providerId,
@@ -276,7 +291,11 @@ export class ProviderConfigResolver {
         const modelIssues = registryModelResult.ok ? [] : registryModelResult.issues;
         issues.push(...modelIssues);
         const modelEnabled = modelConfig.enabled === true;
-        const executable = providerExecutable && modelEnabled && modelIssues.length === 0;
+        const executable =
+          providerExecutable &&
+          modelEnabled &&
+          modelIssues.length === 0 &&
+          (enterpriseCandidates === undefined || enterpriseCandidates.has(modelId));
         const selectable = executable && config.visibility !== "hidden";
         return Object.freeze({
           kind: "candidate",

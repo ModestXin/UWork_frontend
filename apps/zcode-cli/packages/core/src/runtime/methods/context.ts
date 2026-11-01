@@ -25,6 +25,11 @@ import {
   createReadFileStateKey,
   normalizeReadFileStateMtimeMs,
 } from "../../tool/read-file-state.js";
+import {
+  PromptAttachmentAuthorizationError,
+  waitForAttachment,
+} from "../helpers/attachment-authorization.js";
+import { prepareProjectMemoryIndex } from "../helpers/project-memory-index.js";
 import { resolveEnabledProjectMemoryRoot } from "../helpers/project-memory.js";
 import { buildContextHistoryEntries } from "./context-history-entries.js";
 import { resolveRuntimeEmbeddedSearchEnabled } from "./embedded-search-branch.js";
@@ -40,44 +45,88 @@ export async function ensureContextInitialized(
   this: AgentRuntimeInternal,
   traceContext: TraceContext,
   model?: Model,
+  signal?: AbortSignal,
 ): Promise<void> {
   if (this.contextInitialized) return;
 
+  const port = this.permissionService?.enterpriseAuthorization;
+  const skillPort = this.skillPort;
+  const sessionId = this.sessionId;
+  const workspaceIdentity = this.config.memory?.workspaceIdentity;
+  let workspaceRoot = this.workspaceRoot;
+  let workingDirectory = this.workingDirectory;
+  const assertCurrent = () => {
+    signal?.throwIfAborted();
+    if (
+      this.shuttingDown ||
+      this.permissionService?.enterpriseAuthorization !== port ||
+      this.skillPort !== skillPort ||
+      this.sessionId !== sessionId ||
+      this.config.memory?.workspaceIdentity !== workspaceIdentity ||
+      this.workspaceRoot !== workspaceRoot ||
+      this.workingDirectory !== workingDirectory
+    )
+      throw new PromptAttachmentAuthorizationError("enterprise_execution_context_changed");
+  };
+  const wait = async <T>(operation: () => Promise<T>): Promise<T> => {
+    assertCurrent();
+    const result = await waitForAttachment(operation(), signal);
+    assertCurrent();
+    return result;
+  };
+  assertCurrent();
   const shellDisplayName = getContextSourceShellDisplayName(this);
   const snapshot = this.contextSourcePort
-    ? await this.contextSourcePort.resolveContextSources(
-        {
-          workingDirectory: this.workingDirectory,
-          currentDate: this.config.currentDate,
-          effectiveShellDisplayName: shellDisplayName,
-          envInfo: this.config.envInfo,
-          userInstructions: this.config.userInstructions
-            ? {
-                ...this.config.userInstructions,
-                workingDirectory:
-                  this.config.userInstructions.workingDirectory ?? this.workingDirectory,
-              }
-            : undefined,
-          projectContext: this.config.projectContext,
-          trace: traceContext,
-        },
-        { signal: undefined },
+    ? await wait(() =>
+        this.contextSourcePort!.resolveContextSources(
+          {
+            workingDirectory: this.workingDirectory,
+            currentDate: this.config.currentDate,
+            effectiveShellDisplayName: shellDisplayName,
+            envInfo: this.config.envInfo,
+            userInstructions: this.config.userInstructions
+              ? {
+                  ...this.config.userInstructions,
+                  workingDirectory:
+                    this.config.userInstructions.workingDirectory ?? this.workingDirectory,
+                }
+              : undefined,
+            projectContext: this.config.projectContext,
+            trace: traceContext,
+          },
+          { signal },
+        ),
       )
     : this.createConfigOnlyContextSnapshot(this.workingDirectory);
 
   this.workingDirectory = snapshot.workingDirectory;
   // Bash cd 之后 workingDirectory 会变化，但 workspaceRoot 仍表示会话初始工作区边界。
   this.workspaceRoot = snapshot.workingDirectory;
+  workspaceRoot = this.workspaceRoot;
+  workingDirectory = this.workingDirectory;
   this.contextSourceSnapshot = snapshot;
   this.startMcpStartup(traceContext);
-  this.skillLoadOutcome = await this.discoverSkillsForContext(traceContext);
-  this.memoryRoot = await this.loadProjectMemoryRoot(traceContext);
-  this.memoryIndexContent = await loadProjectMemoryIndexContent(
-    this,
-    this.memoryRoot,
-    ACTIVE_PROJECT_MEMORY_RETRIEVAL_BRANCH,
-  );
+  const guardedSkills = this.skillPort?.enterpriseAssetGuarded === true;
+  let pendingSkills = this.skillLoadOutcome;
+  if (!guardedSkills)
+    pendingSkills = await wait(() => this.discoverSkillsForContext(traceContext, signal));
+  this.memoryRoot = await wait(() => this.loadProjectMemoryRoot(traceContext, signal));
+  // 主干按检索分支决定是否使用默认 index；受管准入只在该分支生效时接管 IO 与提交时序。
+  const pendingMemory =
+    ACTIVE_PROJECT_MEMORY_RETRIEVAL_BRANCH === "default-index"
+      ? await wait(() => prepareProjectMemoryIndex(this, this.memoryRoot, traceContext, signal))
+      : undefined;
+  // 保留 Memory 实际 IO 在受管技能发现前；技能保持各项独立准入的已接纳快照。
+  if (guardedSkills)
+    pendingSkills = await wait(() => this.discoverSkillsForContext(traceContext, signal));
   await ensureGenUiOutputDirectory(this);
+  const commitMemory = pendingMemory
+    ? await wait(() => pendingMemory.authorizeCommit())
+    : undefined;
+  // 最终授权之后不再 await，取消/本地换代与所有 Memory sink 同步收口。
+  assertCurrent();
+  this.memoryIndexContent = commitMemory?.();
+  this.skillLoadOutcome = pendingSkills;
   this.contextBuilder = this.createContextBuilderFromSnapshot(snapshot, this.memoryRoot, {
     memoryIndexContent: this.memoryIndexContent,
     model,
@@ -97,8 +146,14 @@ export async function getSkillCatalog(
   // Composer 曾独立扫描磁盘，所以运行中的 Session 会看到 AgentRuntime
   // 尚未加载的新 Skill。先经过 runtime 唯一的 context 初始化门，再返回防御性副本，
   // 让 UI 与本 Session 实际可用的 Skill 保持同一快照；新 runtime 会自然重新发现。
+  const wasInitialized = this.contextInitialized;
   await this.ensureContextInitialized(traceContext);
-  const outcome = this.skillLoadOutcome ?? {
+  // 冷初始化已完成本次发现，不能再开第二轮完整同步；已初始化会话才刷新受管投影。
+  const current =
+    this.skillPort?.enterpriseAssetGuarded === true && wasInitialized
+      ? await this.discoverSkillsForContext(traceContext)
+      : this.skillLoadOutcome;
+  const outcome = current ?? {
     skills: [],
     diagnostics: [],
     totalDiscovered: 0,
@@ -166,6 +221,7 @@ export function createContextBuilderFromSnapshot(
 export async function loadProjectMemoryRoot(
   this: AgentRuntimeInternal,
   traceContext: TraceContext,
+  signal?: AbortSignal,
 ): Promise<string | undefined> {
   const memoryRoot = resolveEnabledProjectMemoryRoot(this.config, this.workspaceRoot);
   if (!memoryRoot) {
@@ -180,7 +236,13 @@ export async function loadProjectMemoryRoot(
     });
     return undefined;
   }
-  await ensureMemoryDirectoryExists(this.fileSystemPort, memoryRoot, traceContext, this.logger);
+  await ensureMemoryDirectoryExists(
+    this.fileSystemPort,
+    memoryRoot,
+    traceContext,
+    this.logger,
+    signal,
+  );
   return memoryRoot;
 }
 
@@ -234,16 +296,20 @@ export function logMemorySkipped(
 export async function discoverSkillsForContext(
   this: AgentRuntimeInternal,
   traceContext: TraceContext,
+  signal?: AbortSignal,
 ): Promise<SkillLoadOutcome | undefined> {
   if (!this.skillPort) {
     return undefined;
   }
 
   try {
-    const outcome = await this.skillPort.discoverSkills({
-      workingDirectory: this.workingDirectory,
-      trace: traceContext,
-    });
+    const outcome = await this.skillPort.discoverSkills(
+      {
+        workingDirectory: this.workingDirectory,
+        trace: traceContext,
+      },
+      { signal },
+    );
     this.logger?.debug("Skills discovered", {
       ...traceContextToLogContext(traceContext),
       diagnosticCount: outcome.diagnostics.length,
@@ -253,6 +319,7 @@ export async function discoverSkillsForContext(
     });
     return outcome;
   } catch (error) {
+    signal?.throwIfAborted();
     this.logger?.warn("Skill discovery failed", {
       ...traceContextToLogContext(traceContext),
       error: error instanceof Error ? error.message : String(error),

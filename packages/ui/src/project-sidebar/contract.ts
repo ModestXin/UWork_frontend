@@ -1,4 +1,4 @@
-import type { Locale, RemoteTarget, UserInfo } from "@zcode/shared";
+import type { EnterpriseMenu, Locale, RemoteTarget, UserInfo } from "@zcode/shared";
 import type { LucideIcon } from "lucide-react";
 import type {
   AppProps,
@@ -145,6 +145,8 @@ export interface ProjectSidebarProps {
   repoWikiActive?: boolean;
   onOpenAutomations?: () => void;
   onOpenPluginStore?: () => void;
+  /** 企业控制台下发的菜单（已由 Host 准入）；缺省表示当前无企业导航。 */
+  onEnterpriseNavigate?: (menu: EnterpriseMenu) => void;
   automationsActive?: boolean;
   pluginStoreActive?: boolean;
   onFileTreeOpenChange?: (open: boolean) => void;

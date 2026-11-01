@@ -59,6 +59,8 @@ export interface ConversationShareTurnPreflightResult {
 }
 
 export interface ConversationSharePreflightResult {
+  /** 当前能力展示，不作为发布授权；未知旧 Host 不得推断公网或 private。 */
+  accessModes?: readonly ConversationShareAccessMode[];
   revision: number;
   logEpoch: string;
   capabilitiesFingerprint: string;

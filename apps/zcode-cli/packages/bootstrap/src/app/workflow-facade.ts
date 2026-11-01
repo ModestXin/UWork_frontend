@@ -1,10 +1,16 @@
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createNodeContextSourceAdapter } from "@zcode/adapters/context";
-import { createNodeExecutionAdapter } from "@zcode/adapters/exec";
+import {
+  createNodeExecutionAdapter,
+  withEnterpriseExecutionAuthorization,
+} from "@zcode/adapters/exec";
 import { createNodeFileSystemAdapter } from "@zcode/adapters/fs";
-import { createNodeWebFetchHttpClientAdapter } from "@zcode/adapters/http";
-import { createNodeSkillAdapter } from "@zcode/adapters/skills";
+import {
+  createNodeWebFetchHttpClientAdapter,
+  withEnterpriseHttpAuthorization,
+} from "@zcode/adapters/http";
+import { createConfiguredSkillPort } from "../skill-runtime.js";
 import type { ConfigResult } from "@zcode/adapters/config";
 import { createInMemorySessionEventStore } from "@zcode/adapters/storage";
 import {
@@ -303,7 +309,7 @@ function createWorkflowChildRuntime(
       eventStore: createInMemorySessionEventStore(),
       sessionStore: deps.sessionStore,
       logger: deps.logger,
-      executionPort:
+      executionPort: withEnterpriseExecutionAuthorization(
         deps.appOptions.executionPort ??
         createNodeExecutionAdapter({
           onToolExecResource: deps.appOptions.onToolExecResource,
@@ -316,31 +322,54 @@ function createWorkflowChildRuntime(
           bashOutputTempDir: tmpdir(),
           processEnv: deps.appOptions.env ?? process.env,
         }),
+        {
+          authorization: deps.permissionService.enterpriseAuthorization,
+          sessionId: options.childSessionId,
+          workspacePath: deps.workingDirectory,
+          workingDirectory: deps.workingDirectory,
+          workspaceIdentity: deps.runtimeConfig.memory?.workspaceIdentity,
+          traceContext: options.childTraceContext,
+        },
+      ),
       fileSystemPort: deps.appOptions.fileSystemPort ?? createNodeFileSystemAdapter(),
-      httpClientPort:
+      httpClientPort: withEnterpriseHttpAuthorization(
         deps.appOptions.httpClientPort ??
-        createNodeWebFetchHttpClientAdapter({
-          env: deps.appOptions.env ?? process.env,
-          timeoutMs: deps.configResult.config.network.timeout,
-          proxyUrl: deps.configResult.config.network.httpProxy,
-          noProxy: deps.configResult.config.network.noProxy,
-          caCertFile: deps.configResult.config.network.caCertFile,
-        }),
+          createNodeWebFetchHttpClientAdapter({
+            env: deps.appOptions.env ?? process.env,
+            timeoutMs: deps.configResult.config.network.timeout,
+            proxyUrl: deps.configResult.config.network.httpProxy,
+            noProxy: deps.configResult.config.network.noProxy,
+            caCertFile: deps.configResult.config.network.caCertFile,
+          }),
+        {
+          authorization: deps.permissionService.enterpriseAuthorization,
+          sessionId: options.childSessionId,
+          workspacePath: deps.workingDirectory,
+          workingDirectory: deps.workingDirectory,
+          workspaceIdentity: deps.runtimeConfig.memory?.workspaceIdentity,
+          traceContext: options.childTraceContext,
+        },
+      ),
       imageProcessorPort: deps.imageProcessorPort,
       pdfDocumentPort: deps.pdfDocumentPort,
       artifactStore: deps.artifactStore,
       contextSourcePort:
         deps.appOptions.contextSourcePort ??
         createNodeContextSourceAdapter({ env: deps.appOptions.env }),
-      skillPort:
-        deps.configResult.config.features.skill && deps.configResult.config.skills.enabled
-          ? (deps.appOptions.skillPort ??
-            createNodeSkillAdapter({
-              extraRoots: deps.configResult.config.skills.roots,
-              // workflow 子 agent 复用同一套 skill 发现逻辑，也必须继承主配置里的禁用路径。
-              disabledPaths: collectDisabledPaths(deps.configResult.config.skillOverrides),
-            }))
-          : undefined,
+      skillPort: createConfiguredSkillPort({
+        enabled: deps.configResult.config.features.skill && deps.configResult.config.skills.enabled,
+        port: deps.appOptions.skillPort,
+        roots: deps.configResult.config.skills.roots,
+        disabledPaths: collectDisabledPaths(deps.configResult.config.skillOverrides),
+        context: {
+          authorization: deps.permissionService.enterpriseAuthorization,
+          catalog: deps.appOptions.enterpriseSkillsCatalog,
+          sessionId: options.childSessionId,
+          workspacePath: deps.workingDirectory,
+          workspaceIdentity: deps.runtimeConfig.memory?.workspaceIdentity,
+          traceContext: options.childTraceContext,
+        },
+      }),
       mcpPort: deps.mcpPort,
       eventSink: deps.eventSink,
       modelFactory: deps.modelFactory,

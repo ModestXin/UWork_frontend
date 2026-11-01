@@ -12,3 +12,6 @@ export type { ProviderEndpointRoutingFactoryOptions } from "./provider-endpoint-
 export * from "./provider-endpoint-routing-fetch.js";
 export { createModelRequestSecurityState } from "./request-security-edition/index.js";
 export type { ModelRequestSecurityState } from "./request-security.js";
+export * from "./official-coding-plan-gateway.js";
+
+export * from "./enterprise-session-fetch.js";

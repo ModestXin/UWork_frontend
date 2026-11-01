@@ -15,6 +15,7 @@ interface CreateModelAdapterBaseOptions {
   modelIoFullRetentionEnabled?: boolean;
   streamIdleTimeoutMs?: number;
   statusSink?: ModelStatusSink;
+  beforeDispatch?: AiSdkModelExecutionConfig["beforeDispatch"];
 }
 
 export type CreateModelAdapterOptions = CreateModelAdapterBaseOptions & {
@@ -31,6 +32,8 @@ export function createModelAdapter(options: CreateModelAdapterOptions): AiSdkMod
   return new AiSdkModelAdapter({
     ...options.executionConfig,
     requestSecurityState: processRequestSecurityState,
+    // 旧工厂只展开executionConfig，漏掉独立注入的guard；真实HTTP出口必须复用同一Host准入。
+    beforeDispatch: options.beforeDispatch ?? options.executionConfig.beforeDispatch,
     debugDir: options.modelIoDir,
     env: options.env,
     logger: options.logger,

@@ -16,8 +16,10 @@ import {
   type UpdateFileInfo,
   type UpdateInfo,
 } from "electron-updater";
-import type { ProviderRuntimeOptions } from "electron-updater/out/providers/Provider.js";
-import { parse as parseYaml } from "yaml";
+import {
+  parseUpdateInfo,
+  type ProviderRuntimeOptions,
+} from "electron-updater/out/providers/Provider.js";
 
 export const ELECTRON_MANIFEST_API_PATH = "/api/v1/releases/electron/manifest";
 
@@ -225,18 +227,20 @@ export class ManifestUpdateProvider extends Provider<UpdateInfo> {
       throw new Error(`Empty electron update manifest: ${manifestUrl.toString()}`);
     }
 
-    const parsed = parseYaml(raw);
+    // 使用 updater 自身的 manifest parser，保留其 legacy 文件字段合同。
+    const parsed = parseUpdateInfo(raw, "manifest", manifestUrl);
     if (!isRecord(parsed) || typeof parsed.version !== "string") {
       throw new Error(`Invalid electron update manifest: ${manifestUrl.toString()}`);
     }
 
-    return {
+    const update: UpdateInfo & { zcodeReleaseChannel: ElectronReleaseChannel } = {
       ...(parsed as unknown as UpdateInfo),
       // Bugfix: preview/stable 切换时旧 manifest 请求可能晚于新请求返回。
       // electron-updater 的 update-available 事件默认不带请求通道，main 进程无法识别过期结果；
       // 这里把本次请求通道随 UpdateInfo 带回去，避免旧通道覆盖更新弹窗内容。
       zcodeReleaseChannel: releaseChannel,
-    } as UpdateInfo;
+    };
+    return update;
   }
 
   override resolveFiles(updateInfo: UpdateInfo): ResolvedUpdateFileInfo[] {

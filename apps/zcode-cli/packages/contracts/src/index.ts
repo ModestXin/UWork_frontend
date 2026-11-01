@@ -13,6 +13,9 @@ export * from "./interfaces/http-client.port.js";
 export * from "./interfaces/image-processor.port.js";
 export * from "./interfaces/pdf-document.port.js";
 export * from "./interfaces/permission.port.js";
+export * from "./interfaces/enterprise-tool-authorization.port.js";
+export * from "./interfaces/enterprise-skills-catalog.port.js";
+export * from "./interfaces/enterprise-connector.port.js";
 export * from "./interfaces/session.port.js";
 export * from "./interfaces/session-mailbox.port.js";
 export * from "./interfaces/session-store.port.js";
@@ -106,3 +109,5 @@ export * from "./tracing/local-turn-preparation.js";
 export type { LocalTtftDetail } from "@zcode/shared";
 
 export * from "./interfaces/permission-full-access.js";
+
+export * from "./interfaces/enterprise-model-relay.port.js";

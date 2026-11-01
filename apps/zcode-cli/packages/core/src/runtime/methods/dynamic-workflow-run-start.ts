@@ -79,6 +79,8 @@ export async function startSavedWorkflowRun(
   }
 
   const cwd = this.workingDirectory;
+  // GUI 点击不能覆盖企业文件/身份策略；必须先准入，再读取保存正文。
+  const admission = await this.createWorkflowAdmission({ traceContext });
 
   // (1) 解析 + 实参校验：复用 create-workflow-source 的同一段归一化（第二个调用方，不复制）。
   const found = resolveSavedWorkflow({ cwd, name: input.name, scope: input.scope });
@@ -153,7 +155,9 @@ export async function startSavedWorkflowRun(
   // 父会话以工作流名为首输入标题，后续启动轮会幂等复用。提交失败时由 GUI 在收到
   // rejected ACK 后通过 deleteSession 回收空会话。
   await this.ensureContextInitialized(traceContext);
+  await admission.revalidate();
   await this.ensureSessionPersisted(found.name, traceContext);
+  await admission.revalidate();
   // 直接启动即激活工具面（launch.md「On demand: activation」）：启动轮之后的通知要模型去调
   // GetWorkflowRun；放在落盘之后，entry 才有会话可挂。
   await activateDynamicWorkflowTools.call(this, { source: "run_control", traceContext });
@@ -176,25 +180,34 @@ export async function startSavedWorkflowRun(
   // (3b) 工作副本。中枢直接启动与 `CreateWorkflow` 的 saved 来源是同一件事，所以拷贝也按同一条
   // 规矩写：逐字节（元数据块一起）、保存的定义本身一个字都不动。写不成就没有 `scriptPath`——run 照常起，
   // 只是终态通知里没有可编辑的文件可指。
-  const draft = await writeWorkflowDraft({ cwd, name: found.name, source: found.source });
+  const draft = await writeWorkflowDraft({
+    cwd,
+    name: found.name,
+    source: found.source,
+    admission,
+  });
+  await admission.revalidate();
 
   // (4) 提交启动。提交失败（拒绝 / 抛错）在启动轮之前退出——绝不吞成带 runId 的成功。
   let runId: string;
   try {
-    const submitted = await port.submit({
-      scriptText: found.script,
-      cwd,
-      name: found.name,
-      ...(hasArgs ? { args: validated.args } : {}),
-      parentSessionId: this.sessionId,
-      toolCallId,
-      launchInputId,
-      ...(phaseNames === undefined ? {} : { phaseNames }),
-      ...(phaseAlongside === undefined ? {} : { phaseAlongside }),
-      ...(modelSelections === undefined ? {} : { modelBindings: modelSelections }),
-      ...(draft === undefined ? {} : { scriptPath: draft.path }),
-      trace: traceContext,
-    });
+    const submitted = await port.submit(
+      {
+        scriptText: found.script,
+        cwd,
+        name: found.name,
+        ...(hasArgs ? { args: validated.args } : {}),
+        parentSessionId: this.sessionId,
+        toolCallId,
+        launchInputId,
+        ...(phaseNames === undefined ? {} : { phaseNames }),
+        ...(phaseAlongside === undefined ? {} : { phaseAlongside }),
+        ...(modelSelections === undefined ? {} : { modelBindings: modelSelections }),
+        ...(draft === undefined ? {} : { scriptPath: draft.path }),
+        trace: traceContext,
+      },
+      { admission },
+    );
     runId = submitted.runId;
   } catch (error) {
     return { ok: false, reason: "start_failed", message: describeError(error) };

@@ -50,6 +50,7 @@ export const wecomIdentityConfigSchema = z.preprocess(
     .object({
       /** 控制面基址（三家共用一个控制面）；必须是纯 origin。 */
       apiBaseUrl: httpsUrl,
+      backend: z.enum(["ucas", "uwork"]).default("ucas"),
       /** 缺省授权回调地址：单组织部署写这里，多组织且各家回调域名不同时写在各组织上。 */
       callbackUrl: httpsUrl.optional(),
       /** 至少一个组织；单组织部署写一个元素。多组织时登录卡片按此清单展示选择。 */

@@ -1,4 +1,13 @@
 /* oxlint-disable eslint(max-lines) -- 发布、远端 staging、安全轮询和原子导入共享同一 attempt 生命周期，拆分会让清理与进度状态失去单一 owner。 */
+import {
+  localFileCapabilities,
+  scopeConversationShareLocalFiles,
+} from "./conversationShareLocalFiles.js";
+import type {
+  ConversationSharePublicationPolicy,
+  ConversationSharePublicationAuthorization,
+} from "./uworkPublicationPolicy.js";
+
 import { createHash, randomUUID } from "node:crypto";
 import type { Dirent } from "node:fs";
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
@@ -171,6 +180,7 @@ function uniqueImportedFileName(
 export interface ConversationShareServiceOptions {
   zcodeAgentService: ConversationShareAgentService;
   client: ConversationShareHttpClient;
+  publicationPolicy?: ConversationSharePublicationPolicy;
   artifactSource: ConversationShareArtifactSource;
   confirmPollIntervalMs?: number;
   confirmPollTimeoutMs?: number;
@@ -667,6 +677,7 @@ function selectRows(
 export class ConversationShareService implements IConversationShareService {
   private readonly zcodeAgentService: ConversationShareAgentService;
   private readonly client: ConversationShareHttpClient;
+  private readonly publicationPolicy?: ConversationSharePublicationPolicy;
   private readonly artifactSource: ConversationShareArtifactSource;
   private readonly confirmPollIntervalMs: number;
   private readonly confirmPollTimeoutMs: number;
@@ -711,6 +722,7 @@ export class ConversationShareService implements IConversationShareService {
   constructor(options: ConversationShareServiceOptions) {
     this.zcodeAgentService = options.zcodeAgentService;
     this.client = options.client;
+    this.publicationPolicy = options.publicationPolicy;
     this.artifactSource = options.artifactSource;
     this.confirmPollIntervalMs = options.confirmPollIntervalMs ?? DEFAULT_CONFIRM_POLL_INTERVAL_MS;
     this.confirmPollTimeoutMs = options.confirmPollTimeoutMs ?? DEFAULT_CONFIRM_POLL_TIMEOUT_MS;
@@ -784,7 +796,28 @@ export class ConversationShareService implements IConversationShareService {
     input: ConversationSharePreflightInput,
     agentService: ConversationShareAgentService,
   ): Promise<ConversationSharePreflightResult> {
-    const capabilities = await this.client.getCapabilities();
+    return this.publicationPolicy
+      ? this.publicationPolicy.run((authorization) =>
+          this.preflightInternal(input, agentService, authorization),
+        )
+      : this.preflightInternal(input, agentService);
+  }
+
+  private async preflightInternal(
+    input: ConversationSharePreflightInput,
+    originalAgent: ConversationShareAgentService,
+    authorization?: ConversationSharePublicationAuthorization,
+  ): Promise<ConversationSharePreflightResult> {
+    const ports = scopeConversationShareLocalFiles(
+      originalAgent,
+      this.artifactSource,
+      authorization,
+    );
+    const agentService = ports.agent;
+    const capabilities = await localFileCapabilities(
+      await this.client.getCapabilities(authorization),
+      authorization,
+    );
     const supportedArtifactTypes = allowedArtifactSummaries(capabilities);
     const conversation = await this.loadAllRows(input, agentService);
     const blockingIssues: ConversationShareFailureIssue[] = [];
@@ -807,6 +840,7 @@ export class ConversationShareService implements IConversationShareService {
         revision: conversation.revision,
         logEpoch: conversation.logEpoch,
         capabilitiesFingerprint: capabilitiesFingerprint(capabilities),
+        accessModes: capabilities.access_modes,
         blockingIssues,
         skippableWarnings,
         deferredIssues,
@@ -916,6 +950,11 @@ export class ConversationShareService implements IConversationShareService {
           ...(allowed ? { artifactType: allowed.type } : { artifactType: extension ?? "unknown" }),
           allowedArtifacts: supportedArtifactTypes,
         } satisfies Partial<ConversationShareFailureIssue>;
+        // 受管附件能力已关闭时不能先 stat 路径再跳过；明确告知该附件未分享。
+        if (authorization?.managedScope && !allowed) {
+          skippableWarnings.push({ code: "artifact_type_not_allowed", ...baseIssue });
+          continue;
+        }
         if (!row.entityId) {
           blockingIssues.push({
             code: "input_attachment",
@@ -1039,6 +1078,7 @@ export class ConversationShareService implements IConversationShareService {
         revision: conversation.revision,
         logEpoch: conversation.logEpoch,
         capabilitiesFingerprint: capabilitiesFingerprint(capabilities),
+        accessModes: capabilities.access_modes,
         blockingIssues: sanitizedBlockingIssues.issues,
         skippableWarnings: sanitizedWarnings.issues,
         deferredIssues: sanitizedDeferred.issues,
@@ -1117,6 +1157,17 @@ export class ConversationShareService implements IConversationShareService {
         assistantText,
         input.workspacePath,
       );
+      if (authorization?.managedScope && capabilities.allowed_artifacts.length === 0) {
+        if (references.length > 0)
+          skippableWarnings.push({
+            code: "artifact_type_not_allowed",
+            scope: "artifact",
+            productTurnId,
+            turnOrdinal: turnOrdinalByProductTurnId.get(productTurnId),
+            allowedArtifacts: [],
+          });
+        continue;
+      }
       const needsFileChanges = references.some(
         (reference) => reference.kind === "markdown" || reference.kind === "html",
       );
@@ -1156,10 +1207,10 @@ export class ConversationShareService implements IConversationShareService {
       });
       const visibleCandidates: ConversationPreviewArtifactCandidate[] = [];
       const previewCanonicalPaths = new Set<string>();
-      let previewStatSettled = this.artifactSource.stat !== undefined;
+      let previewStatSettled = ports.source.stat !== undefined;
       // stat 并发发起，判定仍按候选原顺序进行：去重和可见卡片上限都依赖顺序，
       // 而每次 stat 在远程 workspace 下都是一次往返。
-      const artifactSourceStat = this.artifactSource.stat;
+      const artifactSourceStat = ports.source.stat;
       const candidateStats = artifactSourceStat
         ? await mapWithConcurrency(candidates, SHARE_PREFLIGHT_STAT_CONCURRENCY, (candidate) =>
             settle(() =>
@@ -1261,6 +1312,7 @@ export class ConversationShareService implements IConversationShareService {
       revision: conversation.revision,
       logEpoch: conversation.logEpoch,
       capabilitiesFingerprint: capabilitiesFingerprint(capabilities),
+      accessModes: capabilities.access_modes,
       blockingIssues: sanitizedBlockingIssues.issues,
       skippableWarnings: sanitizedWarnings.issues,
       deferredIssues: sanitizedDeferred.issues,
@@ -1359,6 +1411,12 @@ export class ConversationShareService implements IConversationShareService {
     const controller = new AbortController();
     const abortTimer = setTimeout(() => controller.abort(), this.downloadTimeoutMs);
     try {
+      const managed = await this.client.downloadManagedArtifact(
+        artifact.download_url,
+        artifact,
+        controller.signal,
+      );
+      if (managed.managed) return managed.value;
       const response = await this.download(artifact.download_url, { signal: controller.signal });
       if (!response.ok) {
         throw new ConversationShareServiceError(
@@ -1407,7 +1465,15 @@ export class ConversationShareService implements IConversationShareService {
     input: ImportConversationShareInput,
     operationId: string,
   ): Promise<ImportConversationShareResult> {
+    await this.client.assertImportAllowed(input.shareCode, {
+      schema_version: 1,
+      client_request_id: input.clientRequestId,
+    });
     await this.completedImportsLoaded;
+    await this.client.assertImportAllowed(input.shareCode, {
+      schema_version: 1,
+      client_request_id: input.clientRequestId,
+    });
     const workspaceKey = workspaceKeyOf(input.targetWorkspacePath, input.targetWorkspaceIdentity);
     const workspaceKeyedShare = importDedupeKey(input.shareCode, workspaceKey);
     const key = `${workspaceKeyedShare}\u0000${input.clientRequestId}`;
@@ -1935,7 +2001,11 @@ export class ConversationShareService implements IConversationShareService {
       remoteWorkspace: Boolean(input.workspaceIdentity || input.remoteSessionId),
     });
     try {
-      const result = await this.publishInternal(input, operationId, agentService);
+      const result = this.publicationPolicy
+        ? await this.publicationPolicy.run((authorization) =>
+            this.publishInternal(input, operationId, agentService, authorization),
+          )
+        : await this.publishInternal(input, operationId, agentService);
       this.logger.info(undefined, "conversation share publish completed", {
         operationId,
         phase: "complete",
@@ -1979,6 +2049,7 @@ export class ConversationShareService implements IConversationShareService {
     input: PublishTextConversationInput,
     operationId?: string,
     agentService: ConversationShareAgentService = this.zcodeAgentService,
+    authorization?: ConversationSharePublicationAuthorization,
   ): Promise<ConversationShareRecord> {
     const report = (
       phase: ConversationSharePublishProgress["phase"],
@@ -2020,7 +2091,15 @@ export class ConversationShareService implements IConversationShareService {
       throwServiceError("invalid_selection", "At least one conversation row must be selected");
     }
 
-    const capabilities = await this.client.getCapabilities();
+    const localFiles = scopeConversationShareLocalFiles(
+      agentService,
+      this.artifactSource,
+      authorization,
+    );
+    const capabilities = await localFileCapabilities(
+      await this.client.getCapabilities(authorization),
+      authorization,
+    );
     if (!capabilities.access_modes.includes(input.accessMode)) {
       throwServiceError("feature_disabled", "Requested share access mode is unavailable");
     }
@@ -2117,8 +2196,9 @@ export class ConversationShareService implements IConversationShareService {
       if (snapshot) preflightPreviewSnapshots.set(productTurnId, snapshot);
     }
     const artifactSnapshot = await buildConversationShareArtifactSnapshot({
-      zcodeAgentService: agentService,
-      artifactSource: this.artifactSource,
+      zcodeAgentService: localFiles.agent,
+      artifactSource: localFiles.source,
+      skipFileReads: !!authorization?.managedScope && capabilities.allowed_artifacts.length === 0,
       input,
       selectedRows,
       registeredArtifacts: registeredProjection.artifacts,
@@ -2213,14 +2293,17 @@ export class ConversationShareService implements IConversationShareService {
     }
 
     const payloadSha256 = sha256ConversationShareJson(confirmRequest);
-    const preparation = await this.client.createPreparation({
-      client_request_id: input.clientRequestId,
-      title: input.title.trim(),
-      schema_version: 1,
-      access_mode: input.accessMode,
-      payload_sha256: payloadSha256,
-      artifact_count: publicProjection.artifacts.length,
-    });
+    const preparation = await this.client.createPreparation(
+      {
+        client_request_id: input.clientRequestId,
+        title: input.title.trim(),
+        schema_version: 1,
+        access_mode: input.accessMode,
+        payload_sha256: payloadSha256,
+        artifact_count: publicProjection.artifacts.length,
+      },
+      authorization,
+    );
     if (preparation.status === "confirmed") {
       report("complete", publicProjection.artifacts.length, publicProjection.artifacts.length);
       return localizePublishedShare(preparation.share, input.locale);
@@ -2241,6 +2324,7 @@ export class ConversationShareService implements IConversationShareService {
         new Blob([Uint8Array.from(bytes).buffer], {
           type: artifact.descriptor.mime_type,
         }),
+        authorization,
       );
       if (
         upload.artifact_id !== artifact.descriptor.artifact_id ||
@@ -2270,7 +2354,12 @@ export class ConversationShareService implements IConversationShareService {
       report("uploading", uploadedArtifacts, publicProjection.artifacts.length);
     }
     report("checking", uploadedArtifacts, publicProjection.artifacts.length);
-    const share = await this.confirmUntilReady(preparation.preparation_id, confirmRequest);
+    const share = await this.confirmUntilReady(
+      preparation.preparation_id,
+      confirmRequest,
+      authorization,
+      publicProjection.artifacts.length > 0,
+    );
     report("complete", uploadedArtifacts, publicProjection.artifacts.length);
     // 服务端目前不接收 locale，只能把下发的链接改写到界面语言对应的站点；
     // localizeConversationShareUrl 只认已知分享路径形状，其它形状原样保留。
@@ -2484,6 +2573,8 @@ export class ConversationShareService implements IConversationShareService {
   private async confirmUntilReady(
     preparationId: string,
     request: ConversationShareConfirmRequest,
+    authorization?: ConversationSharePublicationAuthorization,
+    files = false,
   ): Promise<ConversationShareRecord> {
     let deadline: number | undefined;
     let lastRequestId: string | undefined;
@@ -2491,7 +2582,7 @@ export class ConversationShareService implements IConversationShareService {
     let lastCode: number | undefined;
     while (true) {
       try {
-        return await this.client.confirm(preparationId, request);
+        return await this.client.confirm(preparationId, request, authorization, files);
       } catch (error) {
         if (
           !(error instanceof ConversationShareClientError) ||

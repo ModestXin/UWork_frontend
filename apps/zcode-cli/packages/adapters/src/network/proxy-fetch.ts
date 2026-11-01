@@ -16,6 +16,8 @@ interface NetworkProxyFetchOptions {
   fetch?: NetworkFetch;
   httpProxy?: string;
   noProxy?: string;
+  /** Trusted runtime guard; true means managed and forbids native redirect following. */
+  beforeDispatch?: (url: string, signal?: AbortSignal | null) => Promise<boolean>;
 }
 
 interface NormalizedFetchRequest {
@@ -28,7 +30,7 @@ interface NormalizedFetchRequest {
 
 export function createNetworkProxyFetch(options: NetworkProxyFetchOptions): NetworkFetch {
   const directFetch = options.fetch ?? globalThis.fetch.bind(globalThis);
-  if (!hasNetworkFetchPolicy(options)) {
+  if (!hasNetworkFetchPolicy(options) && !options.beforeDispatch) {
     return directFetch;
   }
 
@@ -46,16 +48,22 @@ export function createNetworkProxyFetch(options: NetworkProxyFetchOptions): Netw
   return async (input, init) => {
     const requestUrl = readFetchInputUrl(input);
     if (!requestUrl || (requestUrl.protocol !== "http:" && requestUrl.protocol !== "https:")) {
+      if (options.beforeDispatch) throw new Error("enterprise_network_target_invalid");
       return directFetch(input, init);
     }
 
     const proxyUrl = resolveProxyUrlForRequest(requestUrl, options);
     const caCertFile = resolveTlsCaCertFile(options);
     if (!proxyUrl && !caCertFile) {
-      return directFetch(input, init);
+      const managed = await options.beforeDispatch?.(requestUrl.href, init?.signal);
+      init?.signal?.throwIfAborted();
+      return directFetch(input, managed ? { ...init, redirect: "error" } : init);
     }
 
     const request = await normalizeFetchRequest(input, init);
+    // Request body准备可能异步等待；旧允许不能跨过这个真实HTTP出口边界。
+    await options.beforeDispatch?.(request.url.href, request.signal);
+    request.signal?.throwIfAborted();
     return fetchWithAgent(request, {
       ca: caCertFile ? getTlsCaCertificates() : undefined,
       proxyUrl,

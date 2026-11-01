@@ -1,0 +1,36 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "strict": true,
+    "composite": false,
+    "incremental": false,
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "disableSourceOfProjectReferenceRedirect": true,
+    "types": ["node"]
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "src/**/*.d.ts",
+    "src/**/*.json",
+    "test/conversationShareAccess.test.ts",
+    "test/conversationSharePermission.test.tsx"
+  ],
+  "references": [
+    {
+      "path": "../provider"
+    },
+    {
+      "path": "../shared"
+    },
+    {
+      "path": "../services"
+    },
+    {
+      "path": "../rpc"
+    }
+  ]
+}

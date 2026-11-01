@@ -65,7 +65,11 @@
         "src/runtime/methods/steering.ts",
         "src/runtime/methods/turn.ts",
         "src/runtime/methods/turn-model-step.ts",
-        "**/packages/ui/src/remote-connection-flow/index.ts"
+        "**/packages/ui/src/remote-connection-flow/index.ts",
+        // 双后端集成：网关服务合并 ucas 与 uwork 两套 provisioning 后超过 400 行，
+        // 分享契约仅新增 organization 模式与 can_revoke 两行即触顶；拆分留待 P1 收敛。
+        "**/packages/services/src/ucas-gateway/ucasGatewayService.ts",
+        "**/packages/shared/src/conversation-share.ts"
       ],
       "rules": {
         "max-lines": ["warn", { "max": 800, "skipBlankLines": true, "skipComments": true }]

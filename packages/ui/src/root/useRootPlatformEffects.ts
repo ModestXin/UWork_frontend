@@ -114,7 +114,17 @@ export function useRootPlatformEffects({
     }
 
     didBootstrapInitialWorkspaceRef.current = true;
-    if (initialWorkspaceAbsPath) {
+    const restoredActiveWorkspaceKey = activeWorkspaceIdentity?.trim() || activeWorkspacePath;
+    const preserveRestoredWorkspace =
+      isRendererReloadNavigation() &&
+      tabs.some(
+        (tab) =>
+          isWorkspaceTab(tab) &&
+          (tab.workspaceIdentity?.trim() || tab.workspacePath) === restoredActiveWorkspaceKey,
+      );
+    // 窗口 URL 保留的是创建时入口；刷新已有恢复选择时再次注入它，会把用户后来
+    // 选中的项目改回旧默认目录。仅无恢复目标时沿原入口兜底，冷启动仍执行显式入口。
+    if (initialWorkspaceAbsPath && !preserveRestoredWorkspace) {
       const savedScope = readComposerWorkspaceScope(
         initialWorkspaceAbsPath,
         initialWorkspaceIdentity,
@@ -173,6 +183,9 @@ export function useRootPlatformEffects({
     initialWorkspaceAbsPath,
     initialWorkspaceIdentity,
     initialWorkspacePurpose,
+    activeWorkspacePath,
+    activeWorkspaceIdentity,
+    tabs,
     setIsBootstrappingInitialWorkspace,
     startDraftInWorkspace,
   ]);
@@ -314,7 +327,20 @@ export function useRootPlatformEffects({
           }
         })
       : () => {};
+    let active = true;
+    // Main 已拥有未 ready 请求的缓存；恢复/初始 workspace 注入完成前不能释放。
+    // 之前只等监听器安装，显式目录会先打开、随后又被 initial workspace 抢回激活态。
+    // microtask 让 StrictMode 已 cleanup 的订阅退出，pending 的消费与幂等仍由 Main 拥有。
+    void Promise.resolve()
+      .then(() => {
+        if (active && canBootstrapInitialWorkspace && didBootstrapInitialWorkspaceRef.current)
+          return platform.notifyRendererReady();
+      })
+      .catch((error: unknown) => {
+        logger.warn("[Root] 通知 renderer ready 失败", { error });
+      });
     return () => {
+      active = false;
       disposeFocusTab();
       disposeNewTab();
       disposeNewTask();
@@ -324,7 +350,7 @@ export function useRootPlatformEffects({
       disposeNotificationClick();
       disposeUpdateCheckResult();
     };
-  }, [activeWorkspaceIdentity, activeWorkspacePath, platform, tabs]);
+  }, [activeWorkspaceIdentity, activeWorkspacePath, canBootstrapInitialWorkspace, platform, tabs]);
 
   useEffect(() => {
     const pending = pendingShareImportRef.current;

@@ -70,6 +70,8 @@ import { executeArtifactPublish } from "./workflow-artifact-publish.js";
 import { qualityEpilogue } from "./workflow-ask-epilogue.js";
 import { ensureSubmitProfileFits } from "./workflow-driver-submit-profile.js";
 import { executeWorldRead } from "./workflow-world-read.js";
+import { withWorkflowModelAdmission } from "./workflow-model-admission.js";
+import { withWorkflowIo } from "./workflow-io-admission.js";
 import {
   createActorModelActivity,
   createRunStallClock,
@@ -275,6 +277,7 @@ class AgentRuntimeWorkflowDriver implements WorkflowDriver {
     // 的每个 ordinal（fan-out 的每条 lane）跑的是同一组 ask 站点，profile 自然相同。缺席 = generic。
     const submitProfile =
       this.deps.actorSubmitProfiles?.get(actor.siteId) ?? GENERIC_SUBMIT_PROFILE;
+    const modelAdmission = withWorkflowModelAdmission(this.deps, modelActivity.admission);
     // await：生产工厂在返回前把会话落库并建 task link（FK 要求 session 行先存在）。
     // 引擎的 ensureSession 会 await 本方法，所以第一次 ask 派发前持久化已完成。
     const runtime = await this.deps.runtimeFactory({
@@ -285,12 +288,15 @@ class AgentRuntimeWorkflowDriver implements WorkflowDriver {
       submitProfile,
       escalatePort,
       ...(seed === undefined ? {} : { seed }),
-      ...(modelActivity.admission === undefined
-        ? {}
-        : { modelRequestAdmission: modelActivity.admission }),
+      ...(modelAdmission === undefined ? {} : { modelRequestAdmission: modelAdmission }),
     });
     if (seed !== undefined) {
-      await seedActorSession(this.deps, { journaledSessionId: journaled, runtime, seed, sessionId });
+      await seedActorSession(this.deps, {
+        journaledSessionId: journaled,
+        runtime,
+        seed,
+        sessionId,
+      });
     }
     state = {
       ref,
@@ -483,15 +489,28 @@ class AgentRuntimeWorkflowDriver implements WorkflowDriver {
   ): void {
     const abortSignal = state.abortController?.signal;
     state.turnGeneration++;
-    state.turn = state.runtime
-      .executeTurn(input, undefined, {
+    const execute = () =>
+      state.runtime.executeTurn(input, undefined, {
         ...(abortSignal ? { abortSignal } : {}),
         epilogueStart,
-      })
-      .then(
-        (result) => this.onTurnResolved(state, instance, result),
-        (error) => this.onTurnRejected(state, instance, error),
-      );
+      });
+    const signals = [this.deps.executionSignal, abortSignal].filter(
+      (value): value is AbortSignal => !!value,
+    );
+    state.turn = (
+      this.deps.admission
+        ? withWorkflowIo(
+            {
+              ...this.deps,
+              executionSignal: signals.length ? AbortSignal.any(signals) : undefined,
+            },
+            execute,
+          )
+        : execute()
+    ).then(
+      (result) => this.onTurnResolved(state, instance, result),
+      (error) => this.onTurnRejected(state, instance, error),
+    );
   }
 
   private onTurnResolved(state: SessionState, instance: InstanceRef, result: TurnResult): void {
@@ -502,7 +521,9 @@ class AgentRuntimeWorkflowDriver implements WorkflowDriver {
       this.reportTurnOutcome(state, instance, result);
       return;
     }
-    void this.settleExchange(state, instance, result);
+    void this.settleExchange(state, instance, result).catch((error) =>
+      this.onTurnRejected(state, instance, error),
+    );
   }
 
   /**

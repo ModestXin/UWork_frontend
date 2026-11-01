@@ -1,23 +1,30 @@
-import { BrowserWindow, ipcMain } from "electron";
+import { ipcMain, webContents } from "electron";
 import {
   DISABLED_RENDERER_ACTION_TRACE_CONFIG,
   PlatformChannels,
   type RendererActionTraceConfigV1,
 } from "@zcode/shared";
 import type { RendererActionTraceBroker } from "./rendererActionTraceBroker.js";
-import type { RendererActionTraceRollout } from "./rendererActionTraceRollout.js";
+import type { BoundClientPresentation } from "./clientPresentationBindings.js";
+import {
+  authorizeRendererTraceBatch,
+  resolveBoundRendererTraceConfig,
+} from "./clientPresentationTrace.js";
 
 const RENDERER_ACTION_TRACE_REFRESH_INTERVAL_MS = 60_000;
 
 export function registerRendererActionTraceIpc(options: {
-  rollout: RendererActionTraceRollout;
+  presentation: {
+    read(senderId: number): Promise<BoundClientPresentation>;
+    isCurrent(senderId: number, epoch: string): boolean;
+  };
   broker: RendererActionTraceBroker;
   env?: Record<string, string | undefined>;
   logger: {
     debug(...args: unknown[]): void;
     warn(...args: unknown[]): void;
   };
-}): () => void {
+}) {
   type RendererInstanceBinding = {
     current?: string;
     stale: Set<string>;
@@ -61,22 +68,21 @@ export function registerRendererActionTraceIpc(options: {
     rendererInstances.set(senderId, binding);
     return binding;
   };
-  let lastConfig = resolveRuntimeConfig(options.rollout.getSnapshot(), options.env ?? process.env);
-
-  const refresh = async (): Promise<RendererActionTraceConfigV1> => {
-    const next = resolveRuntimeConfig(await options.rollout.refresh(), options.env ?? process.env);
-    if (JSON.stringify(next) !== JSON.stringify(lastConfig)) {
-      lastConfig = next;
-      for (const win of BrowserWindow.getAllWindows()) {
-        if (!win.isDestroyed()) {
-          win.webContents.send(PlatformChannels.RendererActionTraceConfigChanged, next);
-        }
-      }
-    }
-    return next;
+  const send = (senderId: number, bound: BoundClientPresentation): RendererActionTraceConfigV1 => {
+    const config = resolveBoundRendererTraceConfig(bound, options.env ?? process.env);
+    const sender = webContents.fromId(senderId);
+    if (sender && !sender.isDestroyed())
+      sender.send(PlatformChannels.RendererActionTraceConfigChanged, config);
+    return config;
   };
-
-  ipcMain.handle(PlatformChannels.GetRendererActionTraceConfig, refresh);
+  const refresh = async (senderId: number): Promise<RendererActionTraceConfigV1> => {
+    const sender = webContents.fromId(senderId);
+    if (sender && !rendererInstances.has(senderId)) bindRendererLifecycle(sender, senderId);
+    return send(senderId, await options.presentation.read(senderId));
+  };
+  ipcMain.handle(PlatformChannels.GetRendererActionTraceConfig, (event) =>
+    refresh(event.sender.id),
+  );
   ipcMain.on(PlatformChannels.ReportRendererActionTraceBatch, (event, batch: unknown) => {
     if (typeof batch !== "object" || batch === null) return;
     const rendererInstanceId = (batch as { rendererInstanceId?: unknown }).rendererInstanceId;
@@ -97,23 +103,44 @@ export function registerRendererActionTraceIpc(options: {
       return;
     }
     binding.current ??= rendererInstanceId;
-    options.broker.enqueue(batch);
+    const admit = async () => {
+      if (
+        event.sender.isDestroyed() ||
+        rendererInstances.get(senderId)?.current !== rendererInstanceId
+      )
+        return false;
+      const config = await refresh(senderId);
+      return (
+        config.bindingEpoch !== undefined &&
+        options.presentation.isCurrent(senderId, config.bindingEpoch) &&
+        rendererInstances.get(senderId)?.current === rendererInstanceId &&
+        authorizeRendererTraceBatch(batch, config)
+      );
+    };
+    // 入队和每次真正派发都重新读同一 Host；旧 Renderer/owner 的 queue 不可变成新身份的采样。
+    void admit()
+      .then((allowed) => {
+        if (allowed) options.broker.enqueue(batch, admit);
+      })
+      .catch(() => {});
   });
 
   const refreshTimer = setInterval(() => {
-    void refresh().catch((error) => {
-      options.logger.debug("[renderer-action-trace] refresh failed", { error });
-    });
+    for (const senderId of rendererInstances.keys())
+      void refresh(senderId).catch(() =>
+        options.logger.debug("[renderer-action-trace] config unavailable"),
+      );
   }, RENDERER_ACTION_TRACE_REFRESH_INTERVAL_MS);
   refreshTimer.unref();
 
-  return () => {
+  const dispose = () => {
     clearInterval(refreshTimer);
     ipcMain.removeHandler(PlatformChannels.GetRendererActionTraceConfig);
     ipcMain.removeAllListeners(PlatformChannels.ReportRendererActionTraceBatch);
     for (const binding of rendererInstances.values()) binding.dispose();
     rendererInstances.clear();
   };
+  return { dispose, refresh, publish: send };
 }
 
 export function resolveRuntimeConfig(

@@ -51,12 +51,20 @@ export function TabStoreProvider({ children }: { children: ReactNode }) {
  *   const tabs = useTabStore(s => s.tabs);
  *   const addTab = useTabStore(s => s.addTab);
  */
-export function useTabStore<T>(selector: (state: TabStoreState) => T): T {
+export interface TabStoreAccessOptions {
+  requireProvider?: boolean;
+}
+
+export function useTabStore<T>(
+  selector: (state: TabStoreState) => T,
+  options?: TabStoreAccessOptions,
+): T {
   const store = useContext(TabStoreContext);
-  if (!store) {
+  if (!store && options?.requireProvider !== false) {
     throw new Error("useTabStore 必须在 TabStoreProvider 内使用");
   }
-  return useStore(store, selector);
+  // 无 workspace 的服务读取允许空 Tab 元数据，但恢复路径时不能改变合法渲染的 Hook 顺序。
+  return useStore(store ?? fallbackTabStore, selector);
 }
 
 /** 供可独立渲染的展示组件读取；无 Root provider 时回退为空 tab 状态。 */

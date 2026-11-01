@@ -119,7 +119,10 @@ export function createProjectMemoryAgentToolExecutor(
     maxConcurrency: runtime.config.toolConcurrency?.maxConcurrency,
     model: context.model,
     permissionBroker: createDenyPermissionBroker(),
-    permissionService: new PermissionService(defaultPermissionConfig),
+    permissionService: new PermissionService(
+      defaultPermissionConfig,
+      runtime.permissionService.enterpriseAuthorization,
+    ),
     // Memory agent 必须继承 Main 已完成的 Read；否则 provider context 说文件已读，
     // Edit 执行边界却会拒绝同一文件，和基线的 cloned tool context 不一致。
     readFileState: new Map(context.readFileState),

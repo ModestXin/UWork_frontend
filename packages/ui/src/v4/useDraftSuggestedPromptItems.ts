@@ -5,6 +5,8 @@ import {
   useClientScenesResource,
 } from "@/hooks/useClientScenesResource.js";
 import { logger } from "@/logger.js";
+import { usePluginReferenceCatalog } from "@/hooks/usePluginReferenceCatalog.js";
+import { useEnterpriseIdentityStore } from "@/store/enterpriseIdentityStore.js";
 import {
   mapClientScenesToDraftSuggestedPromptItems,
   type DraftSuggestedPromptItem,
@@ -14,14 +16,34 @@ export function useDraftSuggestedPromptItems({
   clientScenesService,
   rpcReady,
   workspaceKey,
+  workspacePath,
+  workspaceIdentity,
+  remoteSessionId,
 }: {
   clientScenesService: IClientScenesService;
   rpcReady: boolean;
   workspaceKey: string;
+  workspacePath: string;
+  workspaceIdentity?: string;
+  remoteSessionId?: string;
 }): DraftSuggestedPromptItem[] {
   const clientScenes = useClientScenesResource(clientScenesService, {
     enabled: rpcReady,
   });
+  const identityRevision = useEnterpriseIdentityStore((state) => state.view?.revision ?? 0);
+  const hasPublishedPlugin = clientScenes.scenes.some((scene) =>
+    scene.options.prompts?.items?.some((item) => Boolean(item.pluginStableId)),
+  );
+  const catalog = usePluginReferenceCatalog(
+    workspacePath,
+    workspaceIdentity,
+    null,
+    rpcReady && hasPublishedPlugin,
+    {
+      preferredRemoteSessionId: remoteSessionId,
+      refreshRevision: identityRevision,
+    },
+  );
 
   useEffect(() => {
     const error = clientScenes.error;
@@ -41,7 +63,7 @@ export function useDraftSuggestedPromptItems({
   }, [clientScenes.error, workspaceKey]);
 
   return useMemo(
-    () => mapClientScenesToDraftSuggestedPromptItems(clientScenes.scenes),
-    [clientScenes.scenes],
+    () => mapClientScenesToDraftSuggestedPromptItems(clientScenes.scenes, catalog.entries),
+    [clientScenes.scenes, catalog.entries],
   );
 }

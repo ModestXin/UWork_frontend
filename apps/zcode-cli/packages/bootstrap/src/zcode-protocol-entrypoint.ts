@@ -15,6 +15,7 @@ import {
 } from "@zcode/shared";
 import type { SqliteSessionStore } from "@zcode/adapters/storage";
 import { traceContextToLogContext, createRootTraceContext } from "@zcode/contracts";
+import { createRuntimeAssetGuards } from "./app/enterprise-runtime-assets.js";
 import type { McpPort, ModelSelection } from "@zcode/contracts";
 import type { PresentationSurface } from "@zcode/core";
 import type { RunZCodeProtocolAgentOptions, ZCodeAppOptions } from "./app/types.js";
@@ -44,9 +45,17 @@ import {
   type OfficialMcpAuthRequestContext,
 } from "./zcode-protocol/official-mcp-auth-port.js";
 import {
+  createProtocolEnterpriseToolAuthorization,
+  type EnterpriseToolAuthorizationContext,
+} from "./zcode-protocol/enterprise-tool-authorization.js";
+import { createProtocolEnterpriseSkillsCatalog } from "./zcode-protocol/enterprise-skills-catalog.js";
+import { createProtocolEnterpriseConnectorPort } from "./zcode-protocol/enterprise-connectors.js";
+import { createProtocolEnterpriseModelRelay } from "./zcode-protocol/enterprise-model-relay.js";
+import {
   createOfficialMcpTrustedOriginRegistry,
   OFFICIAL_MCP_DEV_TRUSTED_ORIGINS_ENV,
   ZCODE_WORKSPACE_IDENTITY_ENV,
+  ZCODE_ENTERPRISE_POLICY_REQUIRED_ENV_KEY,
   resolveRuntimeZCodeEndpointOrigin,
 } from "@zcode/shared";
 import { ZCodeProtocolAgentServer } from "./zcode-protocol/server.js";
@@ -61,11 +70,20 @@ export function applyProtocolPresentationSurface(
   options: Omit<ZCodeAppOptions, "providerRegistry">,
   presentationSurface: PresentationSurface,
 ): Omit<ZCodeAppOptions, "providerRegistry"> {
+  const initialSurface = options.runtimeConfig?.presentationSurface ?? presentationSurface;
+  const port = options.turnPresentationPort;
   return {
     ...options,
+    ...(port
+      ? {
+          turnPresentationPort: {
+            read: async (input) => (await port.read(input)) ?? initialSurface,
+          },
+        }
+      : {}),
     runtimeConfig: {
       ...options.runtimeConfig,
-      presentationSurface,
+      presentationSurface: initialSurface,
     },
   };
 }
@@ -226,6 +244,41 @@ export async function runZCodeProtocolAgent(
     // server 就绪前该端口返回 official_auth_unavailable；HTTP tools/call 会匿名交给服务端
     // 返回结构化权限错误，stdio 则把 reason 下发给插件。连接与工具发现都不受影响。
     let officialMcpAuthContext: OfficialMcpAuthRequestContext | undefined;
+    let enterpriseAuthorizationContext: EnterpriseToolAuthorizationContext | undefined;
+    const enterpriseWorkspaceIdentity = (options.env ?? process.env)[
+      ZCODE_WORKSPACE_IDENTITY_ENV
+    ]?.trim();
+    const enterpriseWorkspacePath = options.cwd ?? process.cwd();
+    const enterpriseWorkspace = () => ({
+      workspacePath: enterpriseWorkspacePath,
+      workspaceKey: enterpriseWorkspaceIdentity || enterpriseWorkspacePath,
+      ...(enterpriseWorkspaceIdentity ? { workspaceIdentity: enterpriseWorkspaceIdentity } : {}),
+    });
+    const enterpriseToolAuthorization =
+      (options.env ?? process.env)[ZCODE_ENTERPRISE_POLICY_REQUIRED_ENV_KEY] === "1"
+        ? createProtocolEnterpriseToolAuthorization({
+            context: () => enterpriseAuthorizationContext,
+            workspace: enterpriseWorkspace,
+          })
+        : undefined;
+    const enterpriseSkillsCatalog = enterpriseToolAuthorization
+      ? createProtocolEnterpriseSkillsCatalog({
+          context: () => enterpriseAuthorizationContext,
+          workspace: enterpriseWorkspace,
+        })
+      : undefined;
+    const enterpriseConnectors = enterpriseToolAuthorization
+      ? createProtocolEnterpriseConnectorPort({
+          context: () => enterpriseAuthorizationContext,
+          workspace: enterpriseWorkspace,
+        })
+      : undefined;
+    const enterpriseModelRelay = enterpriseToolAuthorization
+      ? createProtocolEnterpriseModelRelay({
+          context: () => enterpriseAuthorizationContext,
+          workspace: enterpriseWorkspace,
+        })
+      : undefined;
     // stdio 官方 MCP 没有 url 可供校验，targetOrigin 只能由宿主给出。
     // 与下面 trustedOrigins 的 resolveZCodeApiOrigin 必须是同一个表达式，否则两侧判定分叉。
     const resolveZCodeApiOrigin = (): string =>
@@ -263,6 +316,14 @@ export async function runZCodeProtocolAgent(
       requestMcpElicitation: McpElicitationPort["requestElicitation"];
       handleMcpNotification: McpNotificationPort["onNotification"];
     } | null = null;
+    // 真实Desktop使用共享pool lease；只装在App fallback adapter会漏掉连接/发现出口。
+    const pooledAssetGuards = createRuntimeAssetGuards({
+      authorization: enterpriseToolAuthorization,
+      sessionId: "protocol-mcp",
+      workspacePath: enterpriseWorkspacePath,
+      workspaceIdentity: enterpriseWorkspaceIdentity,
+      traceContext,
+    });
     mcpConnectionPool =
       configResult.config.features.mcp === false
         ? undefined
@@ -278,6 +339,7 @@ export async function runZCodeProtocolAgent(
               onNotification: (notification) =>
                 elicitationServer?.handleMcpNotification(notification),
             },
+            beforeDispatch: pooledAssetGuards?.connector,
             clientVersion: options.version ?? "0.0.0",
             env: options.env,
             logger,
@@ -329,10 +391,17 @@ export async function runZCodeProtocolAgent(
             : {}),
           providerEndpointRoutingPort,
           sourceTitle: "electron",
+          enterpriseToolAuthorization,
+          enterpriseSkillsCatalog,
+          enterpriseConnectors,
+          enterpriseModelRelay,
           onToolExecResource: (params) =>
             connection.send({ method: zcodeProtocolNotifications.toolExecResource, params }),
         }),
       cwd: options.cwd,
+      enterpriseToolAuthorization,
+      enterpriseSkillsCatalog,
+      enterpriseWorkspace: enterpriseToolAuthorization ? enterpriseWorkspace() : undefined,
       env: options.env,
       loggerFactory,
       mcpPort,
@@ -346,6 +415,7 @@ export async function runZCodeProtocolAgent(
     }));
     officialMcpAuthContext = server.officialMcpAuthRequestContext;
     elicitationServer = server;
+    enterpriseAuthorizationContext = server.enterpriseToolAuthorizationContext;
     if (configResult.config.features.mcp !== false) {
       nodeReplBrowserBroker = createNodeReplBrowserBroker({
         browserControlPort: server.browserControlPort,

@@ -21,6 +21,7 @@ export async function drainInlineGuideForNextRequest(
     activeTurn,
     events: state.events,
     traceContext: state.turnTraceContext,
+    abortSignal: state.turnAbortSignal,
   });
   if (!drained || drained.pendingInputIds.length === 0) return false;
 

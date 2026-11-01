@@ -374,8 +374,7 @@ export async function createElectronBrowserWebmRecorder(
   };
   recorderWindow.webContents.on("render-process-gone", onRendererGone);
   const onConsoleMessage = (
-    _event: unknown,
-    details: { level?: string; message?: string },
+    details: Electron.Event<Electron.WebContentsConsoleMessageEventParams>,
   ): void => {
     debug?.(
       `[browser-recording] recorder console level=${details.level ?? "unknown"} message=${details.message ?? ""}`,

@@ -3,6 +3,7 @@ import {
   type ExternalWorkspaceOpenDialogCopy,
   confirmExternalWorkspaceOpen,
   isNetworkWorkspacePath,
+  isExternalWorkspaceOpenRequestActive,
   isValidLocalWorkspaceDirectory,
 } from "./desktopOAuthDeepLink.js";
 import {
@@ -28,6 +29,7 @@ interface ResolveExplicitStartupWorkspaceBootstrapDeps {
     warn: (...args: unknown[]) => void;
   };
   confirmationCopy?: ExternalWorkspaceOpenDialogCopy;
+  isRequestActive?: () => boolean;
   parentWindow?: BrowserWindow | null;
 }
 
@@ -56,10 +58,10 @@ export function createStartupDeepLinkConsumptionGate(
   };
 }
 
-export function resolveExplicitStartupWorkspaceBootstrap(
+export async function resolveExplicitStartupWorkspaceBootstrap(
   request: ExplicitStartupWorkspaceRequest,
   deps: ResolveExplicitStartupWorkspaceBootstrapDeps,
-): StartupWindowBootstrap | null {
+): Promise<StartupWindowBootstrap | null> {
   if (request.source === "deep-link") {
     if (isNetworkWorkspacePath(request.path)) {
       // 冷启动 deep link 不能绕过运行中 deep link 的 UNC 早拒绝；
@@ -71,16 +73,20 @@ export function resolveExplicitStartupWorkspaceBootstrap(
     // 首窗 bootstrap 发生在 renderer ready 前，不能走后续 IPC gate；
     // deep link 来源仍必须先让用户确认，取消后回退默认启动。
     if (
-      !confirmExternalWorkspaceOpen(
+      !(await confirmExternalWorkspaceOpen(
         request.path,
         deps.logger,
         deps.parentWindow ?? null,
         deps.confirmationCopy,
-      )
+        deps.isRequestActive,
+      ))
     ) {
       return null;
     }
   }
+
+  if (!isExternalWorkspaceOpenRequestActive(deps.parentWindow ?? null, deps.isRequestActive))
+    return null;
 
   if (!isValidLocalWorkspaceDirectory(request.path)) {
     deps.logger.warn("[startup-workspace] open-workspace argv invalid, falling back", {

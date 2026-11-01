@@ -136,6 +136,8 @@ export function getActiveTurnInfo(this: AgentRuntimeInternal): ActiveTurnInfo | 
 }
 
 export function getTools(this: AgentRuntimeInternal, model?: Model): ModelToolContract[] {
+  // 仅文本模型过去仍被装配默认工具，首轮请求会被严格Adapter拒绝；注册表与历史保持原样。
+  if (model?.properties.supportsToolCall === false) return [];
   if (this.cachedTools === null) {
     this.cachedTools = filterRuntimeVisibleTools.call(this, this.registry.toContracts());
   }

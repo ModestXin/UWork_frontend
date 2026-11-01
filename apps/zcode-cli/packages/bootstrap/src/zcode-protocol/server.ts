@@ -261,6 +261,12 @@ export class ZCodeProtocolAgentServer {
   get officialMcpAuthRequestContext(): Pick<ZCodeProtocolAgentServerContext, "requestClient"> {
     return this.context;
   }
+  get enterpriseToolAuthorizationContext(): Pick<
+    ZCodeProtocolAgentServerContext,
+    "requestClient" | "notify"
+  > {
+    return this.context;
+  }
 
   private messageSink?: (message: ZCodeProtocolOutboundMessage) => void;
   private clientDisconnectError?: Error;
@@ -778,19 +784,19 @@ export class ZCodeProtocolAgentServer {
       case zcodeProtocolMethods.pluginsListUiSurfaces:
         return await listPluginUiSurfaces(this.context, request.params);
       case zcodeProtocolMethods.skillsReferenceCatalog:
-        return await getSkillReferenceCatalog(this.context, request.params);
+        return await getSkillReferenceCatalog(this.context, request.params, request.trace);
       case zcodeProtocolMethods.workflowsList:
-        return await listSavedWorkflowsOp(this.context, request.params);
+        return await listSavedWorkflowsOp(this.context, request.params, request.trace);
       case zcodeProtocolMethods.workflowsGet:
-        return await getSavedWorkflowOp(this.context, request.params);
+        return await getSavedWorkflowOp(this.context, request.params, request.trace);
       case zcodeProtocolMethods.workflowsUpdateMeta:
-        return await updateSavedWorkflowMetaOp(this.context, request.params);
+        return await updateSavedWorkflowMetaOp(this.context, request.params, request.trace);
       case zcodeProtocolMethods.workflowsDelete:
-        return await deleteSavedWorkflowOp(this.context, request.params);
+        return await deleteSavedWorkflowOp(this.context, request.params, request.trace);
       case zcodeProtocolMethods.workflowsRuns:
-        return await listSavedWorkflowRunsOp(this.context, request.params);
+        return await listSavedWorkflowRunsOp(this.context, request.params, request.trace);
       case zcodeProtocolMethods.workflowsMove:
-        return await moveSavedWorkflowOp(this.context, request.params);
+        return await moveSavedWorkflowOp(this.context, request.params, request.trace);
       case zcodeProtocolMethods.workflowsSave:
         return await saveSavedWorkflowFromRunOp(this.context, request.params);
       case zcodeProtocolMethods.workflowsForRun:

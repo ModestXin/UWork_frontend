@@ -218,11 +218,13 @@ async function readBranchDiffContents({
   repoRoot,
   repoRelativePath,
   trackingBranchName,
+  beforeRepoRelativePath = repoRelativePath,
 }: {
   commandProvider: GitCommandProvider;
   repoRoot: string;
   repoRelativePath: string;
   trackingBranchName: string;
+  beforeRepoRelativePath?: string;
 }): Promise<GitDiffContents | null> {
   const mergeBaseResult = await commandProvider.run({
     cwd: repoRoot,
@@ -235,7 +237,7 @@ async function readBranchDiffContents({
     commandProvider,
     repoRoot,
     ref: mergeBase || trackingBranchName,
-    repoRelativePath,
+    repoRelativePath: beforeRepoRelativePath,
   });
   const afterContent = await readGitBlobPreviewContent({
     commandProvider,
@@ -251,16 +253,18 @@ async function readStagedDiffContents({
   commandProvider,
   repoRoot,
   repoRelativePath,
+  beforeRepoRelativePath = repoRelativePath,
 }: {
   commandProvider: GitCommandProvider;
   repoRoot: string;
   repoRelativePath: string;
+  beforeRepoRelativePath?: string;
 }): Promise<GitDiffContents | null> {
   const beforeContent = await readGitBlobPreviewContent({
     commandProvider,
     repoRoot,
     ref: "HEAD",
-    repoRelativePath,
+    repoRelativePath: beforeRepoRelativePath,
   });
   const afterContent = await readGitBlobPreviewContent({
     commandProvider,
@@ -277,17 +281,19 @@ async function readUnstagedDiffContents({
   commandProvider,
   repoRoot,
   repoRelativePath,
+  beforeRepoRelativePath = repoRelativePath,
 }: {
   absolutePath: string;
   commandProvider: GitCommandProvider;
   repoRoot: string;
   repoRelativePath: string;
+  beforeRepoRelativePath?: string;
 }): Promise<GitDiffContents | null> {
   const beforeContent = await readGitBlobPreviewContent({
     commandProvider,
     repoRoot,
     ref: "",
-    repoRelativePath,
+    repoRelativePath: beforeRepoRelativePath,
   });
   const afterContent = await readWorkingTreePreviewContent(absolutePath);
 
@@ -1266,6 +1272,29 @@ export function createGitCliRepo(options?: { commandProvider?: GitCommandProvide
       }
 
       const repoRelativePath = await normalizeInputPath(resolution, params.path);
+      const staged = params.staged ?? params.sourceId === "staged";
+      // 重命名必须在限定单个新路径前识别，否则 Git 会把它拆成新增文件。
+      // 只读同一来源的 rename numstat，避免借用暂存区的旧路径污染未暂存比较。
+      const readOriginalPath = async (revisionArgs: string[]) => {
+        const result = await commandProvider.run({
+          cwd: resolution.repoRoot,
+          args: [
+            "diff",
+            ...revisionArgs,
+            "--no-ext-diff",
+            "--no-textconv",
+            "--numstat",
+            "-z",
+            "--find-renames",
+            "--diff-filter=R",
+            "--",
+          ],
+          timeoutMs: DEFAULT_GIT_DIFF_TIMEOUT_MS,
+          maxOutputBytes: DEFAULT_GIT_OUTPUT_BYTES,
+        });
+        ensureGitCommandSucceeded("git diff rename paths", result);
+        return parseNumstat(result.stdout).get(repoRelativePath)?.originalPath ?? repoRelativePath;
+      };
       if (params.sourceId === "branch") {
         const status = await this.getStatus(params.workspacePath);
         const trackingBranchName = status.summary.trackingBranchName;
@@ -1275,6 +1304,7 @@ export function createGitCliRepo(options?: { commandProvider?: GitCommandProvide
             "Current branch does not have an upstream branch.",
           );
         }
+        const beforeRepoRelativePath = await readOriginalPath([`${trackingBranchName}...HEAD`]);
 
         const branchDiffResult = await commandProvider.run({
           cwd: resolution.repoRoot,
@@ -1286,6 +1316,7 @@ export function createGitCliRepo(options?: { commandProvider?: GitCommandProvide
             "--find-renames",
             `${trackingBranchName}...HEAD`,
             "--",
+            ...(beforeRepoRelativePath === repoRelativePath ? [] : [beforeRepoRelativePath]),
             repoRelativePath,
           ],
           timeoutMs: DEFAULT_GIT_DIFF_TIMEOUT_MS,
@@ -1301,16 +1332,38 @@ export function createGitCliRepo(options?: { commandProvider?: GitCommandProvide
             repoRoot: resolution.repoRoot,
             repoRelativePath,
             trackingBranchName,
+            beforeRepoRelativePath,
           }),
         );
       }
 
-      const staged = params.staged ?? params.sourceId === "staged";
+      const beforeRepoRelativePath = await readOriginalPath(staged ? ["--cached"] : []);
+      const diffPaths =
+        beforeRepoRelativePath === repoRelativePath
+          ? [repoRelativePath]
+          : [beforeRepoRelativePath, repoRelativePath];
       const diffResult = await commandProvider.run({
         cwd: resolution.repoRoot,
         args: staged
-          ? ["diff", "--cached", "--no-ext-diff", "--no-color", "--binary", "--", repoRelativePath]
-          : ["diff", "--no-ext-diff", "--no-color", "--binary", "--", repoRelativePath],
+          ? [
+              "diff",
+              "--cached",
+              "--no-ext-diff",
+              "--no-color",
+              "--binary",
+              "--find-renames",
+              "--",
+              ...diffPaths,
+            ]
+          : [
+              "diff",
+              "--no-ext-diff",
+              "--no-color",
+              "--binary",
+              "--find-renames",
+              "--",
+              ...diffPaths,
+            ],
         timeoutMs: DEFAULT_GIT_DIFF_TIMEOUT_MS,
         maxOutputBytes: DEFAULT_GIT_DIFF_BYTES,
       });
@@ -1323,12 +1376,14 @@ export function createGitCliRepo(options?: { commandProvider?: GitCommandProvide
               commandProvider,
               repoRoot: resolution.repoRoot,
               repoRelativePath,
+              beforeRepoRelativePath,
             })
           : await readUnstagedDiffContents({
               absolutePath,
               commandProvider,
               repoRoot: resolution.repoRoot,
               repoRelativePath,
+              beforeRepoRelativePath,
             });
         return withDiffContents(parsedDiff, contents);
       }

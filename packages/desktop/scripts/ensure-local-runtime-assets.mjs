@@ -96,8 +96,17 @@ const REQUIRED_LOCAL_RUNTIME_ASSETS = [
           script: "prepare:macos-window-bounds",
           isReady: () =>
             existsSync(
-              join(desktopRoot, "resources", "macos-window-bounds", "zcode-window-bounds"),
-            ),
+              join(
+                desktopRoot,
+                "resources",
+                "macos-window-bounds",
+                `zcode-window-bounds-${target.arch}`,
+              ),
+            ) &&
+            (target.arch !== process.arch ||
+              existsSync(
+                join(desktopRoot, "resources", "macos-window-bounds", "zcode-window-bounds"),
+              )),
         },
       ]
     : []),

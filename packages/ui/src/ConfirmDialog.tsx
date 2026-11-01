@@ -76,13 +76,9 @@ export function ConfirmDialogHost() {
         return;
       }
 
-      // 带复选框的选择对话框保留焦点按钮的键盘语义，避免“不了”按 Enter 变成切换。
-      if (
-        displayedRequest?.checkbox &&
-        event.target instanceof HTMLElement &&
-        event.target.closest("button,input")
-      )
-        return;
+      // 普通删除框也必须保留焦点控件的原生键盘语义；否则取消按钮上的 Enter
+      // 会先被此 capture 监听确认，真实归档删除联测已复现意外删除。
+      if (event.target instanceof HTMLElement && event.target.closest("button,input")) return;
       // 二次确认场景下如果不接 Enter，键盘用户会只能切到按钮再触发，
       // 体验和桌面端的确认弹窗不一致。这里在弹窗打开时统一兜住 Enter，保持可预期的确认手势。
       event.preventDefault();

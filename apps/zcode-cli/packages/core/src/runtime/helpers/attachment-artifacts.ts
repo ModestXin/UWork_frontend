@@ -53,6 +53,7 @@ export async function persistAttachmentDataUrl(
 
   // 内存媒体仍可供当前请求使用时吞掉写入失败，会落下冷恢复无法重建的成功历史。
   // image/video 共用这一持久化边界；写入失败必须在 provider 调用前终止当前轮。
+  options.abortSignal?.throwIfAborted();
   const artifact = await options.artifactStore.writeToolResultArtifact(
     {
       content: dataUrl,

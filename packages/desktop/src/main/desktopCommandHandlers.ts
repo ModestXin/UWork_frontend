@@ -481,6 +481,11 @@ async function resolveCurrentZCodeEndpointOrigin(settingService: {
 export async function executeDesktopCommand(options: {
   command: DesktopCommandId;
   fetchHelpConfig?: () => Promise<unknown>;
+  openClientHelp?: (
+    kind: "community" | "feedback",
+    target: BrowserWindow | null | undefined,
+    locale: Locale,
+  ) => Promise<boolean>;
   senderWindow?: BrowserWindow | null;
   logger: {
     info: (...args: unknown[]) => void;
@@ -604,9 +609,17 @@ export async function executeDesktopCommand(options: {
       await options.onRelaunchApp();
       return;
     case DesktopCommandIds.OpenFeedback:
+      if (
+        await options.openClientHelp?.("feedback", targetWindow, options.currentApplicationLocale)
+      )
+        return;
       await openFeedback(options.logger, targetWindow, options.fetchHelpConfig);
       return;
     case DesktopCommandIds.OpenCommunity:
+      if (
+        await options.openClientHelp?.("community", targetWindow, options.currentApplicationLocale)
+      )
+        return;
       await openCommunity(
         options.currentApplicationLocale,
         options.logger,

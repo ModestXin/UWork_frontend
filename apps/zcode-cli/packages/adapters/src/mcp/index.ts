@@ -143,6 +143,11 @@ export interface CreateMcpAdapterOptions {
   elicitation?: McpElicitationPort;
   /** server → client 通知（资源更新 / 列表变化 / 工具列表变化 / 日志）的出口；缺省只记 debug。 */
   notifications?: McpNotificationPort;
+  beforeDispatch?: (
+    config: McpServerConfig,
+    url?: string,
+    signal?: AbortSignal | null,
+  ) => Promise<{ managed: boolean; ownerKey?: string }>;
 }
 
 type McpClient = Client;
@@ -177,6 +182,7 @@ interface McpServerRecord {
   /** 收到 tools/list_changed 后置位，下一次 listTools 重拉。 */
   toolsStale?: boolean;
   transport?: McpTransport;
+  authorize?: (url?: string, signal?: AbortSignal | null) => Promise<boolean>;
 }
 
 /** resources/list 项：只透传标准字段（含 _meta），丢掉 SDK 附加的运行时字段。 */
@@ -226,6 +232,11 @@ export {
   type McpConnectionPool,
   type McpConnectionPoolOptions,
 } from "./pool.js";
+/** 企业连接器：在既有 McpPort 上追加 Host 准入的连接器 server，不新增第二所有者。 */
+export {
+  withEnterpriseConnectorServers,
+  type EnterpriseConnectorOwnerOptions,
+} from "./enterprise-connectors.js";
 export {
   createMcpTelemetryTracker,
   resolvePluginName,
@@ -283,6 +294,7 @@ class NodeMcpAdapter implements McpPort {
   private toolListRevisionCounter = 0;
   /** 每个 server 当前正在执行的工具调用 trace；elicitation 借此归属到会话 / 工具行。 */
   private readonly activeCallTraces = new Map<string, McpElicitationTrace>();
+  private readonly beforeDispatch?: CreateMcpAdapterOptions["beforeDispatch"];
 
   constructor(options: CreateMcpAdapterOptions) {
     this.clientName = options.clientName ?? "zcode";
@@ -300,6 +312,7 @@ class NodeMcpAdapter implements McpPort {
     this.workingDirectory = options.workingDirectory;
     this.elicitation = options.elicitation;
     this.notifications = options.notifications;
+    this.beforeDispatch = options.beforeDispatch;
   }
 
   async connectConfiguredServers(
@@ -1159,6 +1172,8 @@ class NodeMcpAdapter implements McpPort {
 
     const startedAt = Date.now();
     try {
+      const authorization = this.records.get(request.serverName)?.authorize;
+      await authorization?.(undefined, signal);
       const result = await client.callTool(
         {
           name: request.toolName,
@@ -1191,6 +1206,7 @@ class NodeMcpAdapter implements McpPort {
         },
       );
 
+      await authorization?.(undefined, signal);
       const durationMs = Date.now() - startedAt;
       const isError = typeof result.isError === "boolean" ? result.isError : false;
       // 官方 MCP 的 in-band 失败（配额耗尽、无套餐）是 HTTP 200 + isError，wrapper 那条
@@ -1553,6 +1569,7 @@ class NodeMcpAdapter implements McpPort {
       this.updateCurrentRecord(name, generation, {
         client,
         transport,
+        authorize: transportBundle.authorize,
       });
 
       const connectStartedAt = Date.now();
@@ -1573,6 +1590,7 @@ class NodeMcpAdapter implements McpPort {
         signal,
       );
       listToolsDurationMs = Date.now() - listToolsStartedAt;
+      await transportBundle.authorize?.(config.type === "stdio" ? undefined : config.url, signal);
       const tools = listed.tools.map((tool) =>
         normalizeMcpToolDescriptor(
           name,
@@ -1607,6 +1625,7 @@ class NodeMcpAdapter implements McpPort {
         status,
         tools,
         transport,
+        authorize: transportBundle.authorize,
       });
       // A3：重连（同一 adapter 实例）后按登记表重放订阅；首次连接登记表为空，直接跳过。
       await this.replayResourceSubscriptions(name, client);
@@ -1799,7 +1818,14 @@ class NodeMcpAdapter implements McpPort {
         adapterInstanceId: this.adapterInstanceId,
         config: input.oauthConfig,
         credentialStore,
-        fetchFn: createMcpTransportFetch({ env: this.env, network: this.network }),
+        fetchFn: createMcpTransportFetch({
+          env: this.env,
+          network: this.network,
+          beforeDispatch:
+            this.records.get(input.name)?.authorize ??
+            (async (url, requestSignal) =>
+              (await this.beforeDispatch?.(input.config, url, requestSignal))?.managed ?? false),
+        }),
         // 403 step-up：requiredScope 是当前 token scope 的严格超集时 refresh 无法扩权
         // （RFC 6749 §6），必须强制重新授权，否则新 scope 会被静默丢弃并再次 403。
         ...(input.trigger.reason === "insufficient_scope" ? { forceReauthorization: true } : {}),
@@ -1923,7 +1949,22 @@ class NodeMcpAdapter implements McpPort {
     workingDirectory?: string,
     signal?: AbortSignal,
     onCredentialObservation?: (observation: CredentialGenerationObservation) => void,
-  ): Promise<{ transport: McpTransport }> {
+  ): Promise<{ transport: McpTransport; authorize?: McpServerRecord["authorize"] }> {
+    let ownerKey: string | undefined;
+    let managed: boolean | undefined;
+    const authorize = async (url?: string, requestSignal?: AbortSignal | null) => {
+      const decision = await this.beforeDispatch?.(config, url, requestSignal ?? signal);
+      if (managed !== undefined && managed !== (decision?.managed ?? false))
+        throw new Error("enterprise_identity_changed");
+      managed = decision?.managed ?? false;
+      if (decision?.managed) {
+        if (!decision.ownerKey || (ownerKey && ownerKey !== decision.ownerKey))
+          throw new Error("enterprise_identity_changed");
+        ownerKey = decision.ownerKey;
+      }
+      return decision?.managed ?? false;
+    };
+    await authorize(config.type === "stdio" ? undefined : config.url, signal);
     if (config.type === "stdio") {
       const env = {
         ...buildMcpStdioEnv({ env: this.env, network: this.network }),
@@ -1934,7 +1975,11 @@ class NodeMcpAdapter implements McpPort {
         if (key.toUpperCase() === "UWORK_SESSION_DB_MIGRATION") delete env[key];
       }
       return {
+        authorize,
         transport: new ProcessTreeStdioClientTransport({
+          beforeDispatch: async () => {
+            await authorize();
+          },
           command: config.command,
           args: config.args ?? [],
           cwd: config.cwd
@@ -1961,14 +2006,26 @@ class NodeMcpAdapter implements McpPort {
     const fetch = createMcpTransportFetch({
       env: this.env,
       network: this.network,
+      beforeDispatch: authorize,
     });
     if (config.type === "http") {
-      const officialAuthFetch = this.createOfficialAuthFetch(config, serverName, generation);
+      const officialAuthFetch = this.createOfficialAuthFetch(
+        config,
+        serverName,
+        generation,
+        authorize,
+      );
       return {
+        authorize,
         transport: new StreamableHTTPClientTransport(new URL(config.url), {
           // 官方鉴权路径下 authProvider 必为 undefined：不落 OAuth 凭据、
           // 不起 localhost 回调 server、401/403 不转授权流程。
-          authProvider: this.createOAuthClientProvider(serverName, config, onCredentialObservation),
+          authProvider: this.createOAuthClientProvider(
+            serverName,
+            config,
+            onCredentialObservation,
+            authorize,
+          ),
           fetch: officialAuthFetch ?? fetch,
           requestInit: config.headers ? { headers: config.headers } : undefined,
         }),
@@ -1976,8 +2033,14 @@ class NodeMcpAdapter implements McpPort {
     }
 
     return {
+      authorize,
       transport: new SSEClientTransport(new URL(config.url), {
-        authProvider: this.createOAuthClientProvider(serverName, config, onCredentialObservation),
+        authProvider: this.createOAuthClientProvider(
+          serverName,
+          config,
+          onCredentialObservation,
+          authorize,
+        ),
         fetch,
         requestInit: config.headers ? { headers: config.headers } : undefined,
       }),
@@ -1994,6 +2057,7 @@ class NodeMcpAdapter implements McpPort {
     config: McpServerConfig,
     serverName: string,
     generation: number,
+    authorize?: McpServerRecord["authorize"],
   ): typeof globalThis.fetch | undefined {
     if (!isOfficialAuthConfig(config) || config.type !== "http" || !config.official) {
       return undefined;
@@ -2010,7 +2074,11 @@ class NodeMcpAdapter implements McpPort {
       }) as unknown as typeof globalThis.fetch;
     }
     return createOfficialMcpAuthFetch({
-      baseFetch: createMcpTransportFetch({ env: this.env, network: this.network }),
+      baseFetch: createMcpTransportFetch({
+        env: this.env,
+        network: this.network,
+        beforeDispatch: authorize,
+      }),
       official,
       onAuthFailure: (kind) => this.lastOfficialAuthKind.set(serverName, kind),
       onServerResponse: (response) => {
@@ -2045,6 +2113,7 @@ class NodeMcpAdapter implements McpPort {
     serverName: string,
     config: McpServerConfig,
     onCredentialObservation?: (observation: CredentialGenerationObservation) => void,
+    authorize?: McpServerRecord["authorize"],
   ): AuthProvider | OAuthClientProvider | undefined {
     if (config.type === "stdio") return undefined;
     // 官方鉴权与 OAuth 互斥：官方 MCP 的失败只能由 ZCode 登录/套餐解决，
@@ -2056,7 +2125,11 @@ class NodeMcpAdapter implements McpPort {
         ...(onCredentialObservation ? { onCredentialObservation } : {}),
         config: authorizationCodeOAuthConfig,
         credentialStore: this.resolveCredentialStore(),
-        fetchFn: createMcpTransportFetch({ env: this.env, network: this.network }),
+        fetchFn: createMcpTransportFetch({
+          env: this.env,
+          network: this.network,
+          beforeDispatch: authorize,
+        }),
         keyPrefix: createCredentialKeyPrefix(serverName, config.url, authorizationCodeOAuthConfig),
         ...(this.logger ? { logger: this.logger } : {}),
         serverName,
@@ -2268,7 +2341,7 @@ class NodeMcpAdapter implements McpPort {
   private updateCurrentRecord(
     name: string,
     generation: number,
-    patch: Partial<Pick<McpServerRecord, "client" | "transport">>,
+    patch: Partial<Pick<McpServerRecord, "client" | "transport" | "authorize">>,
   ): void {
     if (!this.isCurrentConnection(name, generation)) return;
     const record = this.records.get(name);

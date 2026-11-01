@@ -6,6 +6,7 @@ import { useOptionalTabStore } from "@/store/TabStoreProvider.js";
 import { useRemoteConversationAvailable } from "@/v4/RemoteConversationAvailability.js";
 import { getLocalTtftObserver } from "@/v4/telemetry/localTtftObserver.js";
 import { formatConversationWorkDuration } from "@/v4/conversationWorkDuration.js";
+import { EnterpriseRiskNotice } from "@/v4/EnterpriseRiskNotice.js";
 /**
  * v4 会话 composer（composer parity）。
  *
@@ -2700,6 +2701,7 @@ function ConversationComposerImpl({
           </p>
         ) : null}
       </div>
+      <EnterpriseRiskNotice />
       <ImagePreviewDialog
         initialIndex={attachmentPreviewIndex}
         items={composerMediaPreviewItems}

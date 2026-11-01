@@ -42,9 +42,14 @@ import {
   type ArtifactVersionRecord,
 } from "@zcode/dynamic-workflow";
 import { resolveWithinWorkspace, toWorkspaceRelative } from "./workflow-world-read.js";
+import {
+  withWorkflowIo,
+  isWorkflowAuthorizationError,
+  type WorkflowIoAdmission,
+} from "./workflow-io-admission.js";
 
 /** 产物发布需要的端口与基准目录（driver deps 的一个子集，同 {@link WorldReadDeps}）。 */
-interface ArtifactPublishDeps {
+interface ArtifactPublishDeps extends WorkflowIoAdmission {
   /** 读取被发布文件的字节所用的文件系统端口。 */
   readonly fileSystemPort: FileSystemPort;
   /** 路径解析与相对化的基准目录（workspace 根）。 */
@@ -81,10 +86,8 @@ export async function executeArtifactPublish(
   const opts = artifactPublishOptions(request);
   const store = requireArtifactStore(deps, request);
   const payload =
-    request.op === "file"
-      ? await readFilePayload(deps, request, opts)
-      : markdownPayload(request);
-  const written = await writePayload(store, request, payload);
+    request.op === "file" ? await readFilePayload(deps, request, opts) : markdownPayload(request);
+  const written = await withWorkflowIo(deps, () => writePayload(store, request, payload));
   return {
     id: request.id,
     kind: request.op,
@@ -157,7 +160,8 @@ function artifactPublishOptions(request: ArtifactPublishRequest): ArtifactPublis
     bag.description,
     ARTIFACT_CAPS.maxDescriptionLength,
   );
-  const contentType = request.op === "file" ? optionalContentType(request, bag.contentType) : undefined;
+  const contentType =
+    request.op === "file" ? optionalContentType(request, bag.contentType) : undefined;
   return {
     ...(title === undefined ? {} : { title }),
     ...(description === undefined ? {} : { description }),
@@ -289,8 +293,9 @@ async function resolveWorkspaceFile(
   let realCwd: string;
   let real: string;
   try {
-    realCwd = await realpath(deps.cwd);
+    realCwd = await withWorkflowIo(deps, () => realpath(deps.cwd));
   } catch (cause) {
+    if (isWorkflowAuthorizationError(cause)) throw cause;
     throw new WorkflowError(
       "DriverError",
       `artifact.file: cannot resolve the workspace root '${deps.cwd}': ${errorText(cause)}`,
@@ -298,8 +303,9 @@ async function resolveWorkspaceFile(
     );
   }
   try {
-    real = await realpath(resolved);
+    real = await withWorkflowIo(deps, () => realpath(resolved));
   } catch (cause) {
+    if (isWorkflowAuthorizationError(cause)) throw cause;
     // ENOENT（含中途某一段不存在）走这里：路径不存在与"指向一个不存在的软链目标"是同一件事。
     throw sourceMissing(given, cause);
   }
@@ -320,12 +326,19 @@ async function readCappedBytes(
   const cap = ARTIFACT_CAPS.maxFileBytes;
   let result: FileSystemReadBytesResult;
   try {
-    result = await deps.fileSystemPort.readBinaryFile({ path, maxBytes: cap + 1 });
+    result = await withWorkflowIo(deps, () =>
+      deps.fileSystemPort.readBinaryFile({ path, maxBytes: cap + 1 }),
+    );
   } catch (cause) {
+    if (isWorkflowAuthorizationError(cause)) throw cause;
     if (isFileSystemPortError(cause)) {
       if (cause.code === "too_large") throw tooLarge(given, cap);
       // not_found / is_directory / not_file 都是"这里没有一个可发布的普通文件"。
-      if (cause.code === "not_found" || cause.code === "is_directory" || cause.code === "not_file") {
+      if (
+        cause.code === "not_found" ||
+        cause.code === "is_directory" ||
+        cause.code === "not_file"
+      ) {
         throw sourceMissing(given, cause);
       }
     }
@@ -451,6 +464,7 @@ async function writePayload(
       ...(payload.extension === undefined ? {} : { extension: payload.extension }),
     });
   } catch (cause) {
+    if (isWorkflowAuthorizationError(cause)) throw cause;
     if (cause instanceof WorkflowError) throw cause;
     // 写失败（磁盘满、权限、store 自身的错误）是一次**具体**的失败，与"没有 store"不是
     // 同一件事，所以不复用 ArtifactStoreUnavailable：带上原因文本，让 journal 里的

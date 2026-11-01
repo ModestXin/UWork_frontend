@@ -54,13 +54,18 @@ export const zhipuAccountAccessDataSchema = z
     type: completeZhipuAccountAccessDataSchema.shape.type,
   })
   .strict();
+export const enterpriseSessionAccessDataSchema = z
+  .object({ type: z.literal("enterprise-session") })
+  .strict();
 export const providerAccessDataSchema = z.discriminatedUnion("type", [
   apiKeyAccessDataSchema,
   zhipuAccountAccessDataSchema,
+  enterpriseSessionAccessDataSchema,
 ]);
 export const completeProviderAccessDataSchema = z.discriminatedUnion("type", [
   completeApiKeyAccessDataSchema,
   completeZhipuAccountAccessDataSchema,
+  enterpriseSessionAccessDataSchema,
 ]);
 
 export const completeProviderApiDataSchema = z
@@ -90,6 +95,14 @@ export const providerConfigDataSchema = z
     api: providerApiDataSchema.nullable().optional(),
     builtinModelIds: modelIdsDataSchema,
     personalModelIds: modelIdsDataSchema,
+    // 仅私有Gateway写入的派生候选，不是后台执行授权。
+    enterpriseModelIds: modelIdsDataSchema,
+    // 当前Gateway目录的显示投影；不改变模型执行身份，也不属于个人远端分发事实。
+    enterpriseModelNames: z
+      .record(z.string().min(1).max(80), z.string().trim().min(1).max(200))
+      .readonly()
+      .nullable()
+      .optional(),
     modelOrder: modelIdsDataSchema,
     visibility: providerVisibilityDataSchema.nullable().optional(),
   })

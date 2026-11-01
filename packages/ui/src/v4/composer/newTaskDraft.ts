@@ -18,15 +18,26 @@ export function initializeNewTaskDraft(
   view: ModelSelectionView,
   scope?: ComposerScope,
 ): V4ComposerDraft {
+  if (draft.mode) {
+    if (draft.initializeFromNewTask !== true) return draft;
+    // 空身份首读可先初始化模式；目录晚到只补首个模型，不能覆盖期间编辑的正文或权限。
+    const modelSelection =
+      draft.modelSelection ?? resolveDraftInitialModelSelection(view, null).selection;
+    return modelSelection ? { ...draft, initializeFromNewTask: undefined, modelSelection } : draft;
+  }
   const recent = readComposerRecent(workspacePath, workspaceIdentity, undefined, scope);
+  const modelSelection =
+    draft.modelSelection ??
+    recent?.modelSelection ??
+    resolveDraftInitialModelSelection(view, null).selection ??
+    undefined;
   return {
     ...draft,
+    // 模式就绪不代表用户已决定模型；原草稿保留初始化资格，直到取得首个合法默认。
+    ...(modelSelection ? {} : { initializeFromNewTask: true as const }),
     mode: recent?.mode === "plan" ? "build" : (recent?.mode ?? "build"),
     planEnabled: false,
-    modelSelection:
-      recent?.modelSelection ??
-      resolveDraftInitialModelSelection(view, null).selection ??
-      undefined,
+    modelSelection,
   };
 }
 

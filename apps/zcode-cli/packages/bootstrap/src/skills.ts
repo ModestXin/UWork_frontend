@@ -1,10 +1,20 @@
 import { resolve } from "node:path";
 import { createConfig, resolvePath } from "@zcode/adapters/config";
-import { createNodeSkillAdapter } from "@zcode/adapters/skills";
-import type { Logger, SkillContent, SkillDiagnostic, SkillLoadOutcome } from "@zcode/contracts";
+import type {
+  Logger,
+  SkillContent,
+  SkillDiagnostic,
+  SkillLoadOutcome,
+  SkillPort,
+  TraceContext,
+  EnterpriseSkillsCatalogPort,
+  EnterpriseToolAuthorizationPort,
+} from "@zcode/contracts";
+import { createRootTraceContext } from "@zcode/contracts";
 import { resolveBundledSkillRoots } from "./app/bundled-skills.js";
 import { getCliStorageRoot } from "./app/paths.js";
 import { filterVisualizeSkillRoots } from "./app/visualize-skill-gate.js";
+import { createConfiguredSkillPort } from "./skill-runtime.js";
 import { resolveZCodePlugins } from "./plugins.js";
 import { collectDisabledPaths } from "./skill-command-overrides.js";
 
@@ -17,6 +27,11 @@ export interface ListZCodeSkillsOptions {
   skipUserConfig?: boolean;
   userConfigPath?: string;
   workingDirectory?: string;
+  enterpriseSkillsCatalog?: EnterpriseSkillsCatalogPort;
+  enterpriseToolAuthorization?: EnterpriseToolAuthorizationPort;
+  traceContext?: TraceContext;
+  sessionId?: string;
+  workspaceIdentity?: string;
 }
 
 export interface InspectZCodeSkillOptions extends ListZCodeSkillsOptions {
@@ -42,6 +57,7 @@ export async function listZCodeSkills(
 
   return await discovery.skillPort.discoverSkills({
     workingDirectory: discovery.workingDirectory,
+    trace: options.traceContext,
   });
 }
 
@@ -55,6 +71,7 @@ export async function inspectZCodeSkill(
 
   const outcome = await discovery.skillPort.discoverSkills({
     workingDirectory: discovery.workingDirectory,
+    trace: options.traceContext,
   });
   if (
     !outcome.skills.some(
@@ -67,6 +84,7 @@ export async function inspectZCodeSkill(
   const skill = await discovery.skillPort.loadSkill({
     name: options.name,
     workingDirectory: discovery.workingDirectory,
+    trace: options.traceContext,
   });
 
   return {
@@ -82,7 +100,7 @@ function createSkillDiscovery(options: ListZCodeSkillsOptions):
     }
   | {
       enabled: true;
-      skillPort: ReturnType<typeof createNodeSkillAdapter>;
+      skillPort: SkillPort;
       workingDirectory: string;
     } {
   const workingDirectory = resolve(options.workingDirectory ?? process.cwd());
@@ -118,14 +136,23 @@ function createSkillDiscovery(options: ListZCodeSkillsOptions):
 
   return {
     enabled: true,
-    skillPort: createNodeSkillAdapter({
-      extraRoots: configResult.config.skills.roots,
-      extraResolvedRoots: [
+    skillPort: createConfiguredSkillPort({
+      enabled: true,
+      roots: configResult.config.skills.roots,
+      resolvedRoots: [
         ...filterVisualizeSkillRoots(pluginOutcome.skillRoots, options.includeVisualize),
         ...bundledSkillRoots,
       ],
       disabledPaths: collectDisabledPaths(configResult.config.skillOverrides),
-    }),
+      context: {
+        authorization: options.enterpriseToolAuthorization,
+        catalog: options.enterpriseSkillsCatalog,
+        sessionId: options.sessionId ?? "enterprise-draft",
+        workspacePath: workingDirectory,
+        workspaceIdentity: options.workspaceIdentity,
+        traceContext: options.traceContext ?? createRootTraceContext(),
+      },
+    })!,
     workingDirectory,
   };
 }

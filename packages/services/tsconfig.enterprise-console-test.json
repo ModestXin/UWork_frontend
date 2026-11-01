@@ -1,0 +1,22 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "strict": true,
+    "composite": false,
+    "incremental": false,
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "disableSourceOfProjectReferenceRedirect": true
+  },
+  "include": [
+    "test/enterpriseConsole.test.ts",
+    "test/enterpriseClientPresentation.test.ts",
+    "src/enterprise-console/**/*.ts",
+    "src/enterprise-identity/clientPresentation.ts",
+    "src/enterprise-identity/backendSessionContract.ts",
+    "src/enterprise-identity/uworkBackendSession.ts"
+  ],
+  "references": [{ "path": "../shared" }, { "path": "../rpc" }]
+}

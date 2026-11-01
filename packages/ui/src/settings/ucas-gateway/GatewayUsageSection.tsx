@@ -11,7 +11,7 @@ import {
   formatCount,
   formatPercentValue,
   formatTokens,
-  formatUsd,
+  formatCost,
   shortModelName,
 } from "./gatewayFormat.js";
 import { InfoTile, METRICS, PERIODS, SectionCard, type Translate } from "./gatewayUiParts.js";
@@ -81,7 +81,10 @@ export function UsageSection({
               label={t("usage.successRate")}
               value={formatPercentValue(locale, usage.summary.successRate)}
             />
-            <InfoTile label={t("usage.cost")} value={formatUsd(locale, usage.summary.cost)} />
+            <InfoTile
+              label={t("usage.cost")}
+              value={formatCost(locale, usage.summary.cost, usage.unit)}
+            />
             <InfoTile
               label={t("usage.tokens")}
               value={formatTokens(locale, usage.summary.totalTokens)}
@@ -163,7 +166,7 @@ function ModelBreakdown({
             <span className="shrink-0 text-foreground-subtle">
               {t("usage.modelRow", {
                 requests: formatCount(locale, model.requestCount),
-                cost: formatUsd(locale, model.cost),
+                cost: formatCost(locale, model.cost, usage.unit),
               })}
             </span>
           </div>

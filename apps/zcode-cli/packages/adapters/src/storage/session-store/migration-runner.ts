@@ -8,6 +8,7 @@ import {
   type DatabaseMigrationFacts,
 } from "@zcode/shared";
 import { createHash } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import type { DatabaseSync } from "node:sqlite";
 import {
   ensureSqliteSchemaMigrationTable,
@@ -60,13 +61,14 @@ export async function runSqliteSessionMigrations(
 export async function runSqliteSessionMigrationsAsync(
   db: DatabaseSync, dbPath: string, options: AsyncSqliteMigrationOptions = {},
 ): Promise<MigrationResult> {
-  const startedAt = Date.now();
+  // 墙钟回拨曾让启动 elapsedMs 变负并被严格控制帧 schema 拒绝；本进程计时改用单调时钟。
+  const startedAt = performance.now();
   const deadline = startedAt + (options.lockWaitTimeoutMs ?? DEFAULT_SQLITE_MIGRATION_WAIT_MS);
   let migration: DatabaseMigrationFacts | undefined;
   let migrationId: string | undefined;
   let progressError: unknown;
   const progress = async (phase: SqliteMigrationPhase, extra: Partial<SqliteMigrationProgress> = {}) => {
-    try { await options.onProgress?.({ phase, elapsedMs: Date.now() - startedAt, ...(migration ? { migration: { ...migration } } : {}), ...extra }); }
+    try { await options.onProgress?.({ phase, elapsedMs: Math.max(0, Math.round(performance.now() - startedAt)), ...(migration ? { migration: { ...migration } } : {}), ...extra }); }
     catch (error) { progressError = error; throw error; }
   };
   const acquire = async (operation: () => void) => {
@@ -74,8 +76,7 @@ export async function runSqliteSessionMigrationsAsync(
     let delay = WAL_RETRY_INITIAL_DELAY_MS;
     for (;;) {
       try { operation(); return; } catch (error) {
-        if (!isSqliteBusyError(error)) throw error;
-        const remaining = deadline - Date.now();
+        const remaining = deadline - performance.now();
         if (remaining <= 0) throw lockTimeoutError(error, dbPath);
         if (!waiting) { waiting = true; await progress("waiting_for_lock"); }
         await new Promise<void>((resolve) => setTimeout(resolve, Math.min(delay, remaining)));

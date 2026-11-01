@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { UWorkGatewayModelDescriptor } from "./contract.js";
 import {
   normalizeUcasGatewayBaseUrl,
   ucasGatewayKeySchema,
@@ -17,7 +18,7 @@ const MAX_RESPONSE_BYTES = 512 * 1024;
 /** 网关请求失败分类：鉴权、网络、HTTP 与响应格式分开，供 UI 给出不同提示。 */
 export class UcasGatewayRequestError extends Error {
   constructor(
-    readonly kind: "unauthorized" | "network" | "http" | "invalid",
+    readonly kind: "unauthorized" | "forbidden" | "network" | "http" | "invalid",
     readonly status?: number,
   ) {
     super(`UCAS gateway request failed: ${kind}`);
@@ -127,11 +128,17 @@ export interface UcasGatewayClientOptions {
   /** control-plane 根地址（与企微认证服务同源）。 */
   readonly apiBaseUrl: string;
   readonly token: string;
+  /** Private issuer binding used only by the self-owned opaque-session protocol. */
+  readonly issuerOrigin?: string;
   readonly fetchImpl?: typeof fetch;
   readonly timeoutMs?: number;
+  /** 自有协议复用Host身份owner的取消信号，不作为公开RPC参数。 */
+  readonly signal?: AbortSignal;
 }
 
 export interface UcasGatewayClient {
+  issueDeviceCredential?(previousId?: string): Promise<{ key: UcasGatewayKey; apiKey: string }>;
+  retireDeviceCredential?(keyId: string): Promise<void>;
   readProfile(): Promise<UcasGatewayUser>;
   listKeys(): Promise<readonly UcasGatewayKey[]>;
   generateKey(alias: string): Promise<{ key: UcasGatewayKey; apiKey: string }>;
@@ -141,13 +148,14 @@ export interface UcasGatewayClient {
   readUsage(request: UcasGatewayUsageRequest): Promise<UcasGatewayUsageStats>;
   readPlanModels(): Promise<{
     models: readonly string[];
+    descriptors?: readonly UWorkGatewayModelDescriptor[];
     unrestricted: boolean;
     hasSubscription: boolean;
   }>;
   listEndpointModels(baseUrl: string, apiKey: string): Promise<readonly string[]>;
 }
 
-async function readJson(response: Response): Promise<unknown> {
+export async function readJson(response: Response): Promise<unknown> {
   if (!response.body) return undefined;
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];

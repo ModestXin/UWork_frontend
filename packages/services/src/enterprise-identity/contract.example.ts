@@ -7,3 +7,9 @@ export async function readEnterpriseDisplayName(
   const view = await service.getView();
   return view.status === "authenticated" ? view.profile.displayName : null;
 }
+
+/** Published text is a display projection, never an execution admission. */
+export async function readPublishedWelcome(service: IEnterpriseIdentityService) {
+  const presentation = await service.readClientPresentation();
+  return presentation.status === "ready" ? presentation.welcome : null;
+}

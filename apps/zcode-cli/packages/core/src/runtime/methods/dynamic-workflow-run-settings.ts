@@ -84,6 +84,7 @@ export async function amendWorkflowRunSettings(
   input: AmendWorkflowRunSettingsInput,
 ): Promise<AmendWorkflowRunSettingsResult> {
   const traceContext = input.traceContext ?? this.rootTraceContext;
+  const admission = await this.createWorkflowAdmission({ traceContext });
   const port = this.dynamicWorkflowRunPort;
   if (port === undefined || typeof port.amend !== "function") {
     // 能力只在端口带 amend 与 getScript 时注册；到这里还缺，是接线故障而不是用户输入。
@@ -92,6 +93,7 @@ export async function amendWorkflowRunSettings(
 
   // (1) 这个 run 必须存在、且属于本会话——命令发给哪个会话，就只能改那个会话自己的 run。
   const snapshot = await port.getTask(input.runId);
+  await admission.revalidate();
   if (snapshot === undefined || snapshot.parentSessionId !== this.sessionId) {
     return { ok: false, reason: "not_found" };
   }
@@ -161,6 +163,7 @@ export async function amendWorkflowRunSettings(
   // 并发跑的还是同一段脚本，一个没有存档脚本、或脚本已经编不过的 run 因此照样调得动上界。
   const script =
     typeof port.getScript === "function" ? await port.getScript(input.runId) : undefined;
+  await admission.revalidate();
   if (script === undefined || script.length === 0) {
     return { ok: false, reason: "script_missing" };
   }
@@ -205,6 +208,7 @@ export async function amendWorkflowRunSettings(
     scriptPath: snapshot.scriptPath,
     script,
   });
+  await admission.revalidate();
   const scriptPath =
     keptFile?.path ??
     (
@@ -212,6 +216,7 @@ export async function amendWorkflowRunSettings(
         cwd: this.workingDirectory,
         name: resolveWorkflowDraftName(snapshot.name, graph),
         source: script,
+        admission,
       })
     )?.path;
 
@@ -220,24 +225,28 @@ export async function amendWorkflowRunSettings(
   const phaseNames = createWorkflowPhaseNames(graph);
   const phaseAlongside = phaseNames === undefined ? undefined : createWorkflowPhaseAlongside(graph);
   const subagentModel = parseWorkflowSubagentModel(next.subagentModel);
+  await admission.revalidate();
   let amended: Awaited<ReturnType<NonNullable<typeof port.amend>>>;
   try {
-    amended = await port.amend({
-      scriptText: script,
-      cwd: this.workingDirectory,
-      predecessorRunId: input.runId,
-      parentSessionId: this.sessionId,
-      toolCallId,
-      ...(phaseNames === undefined ? {} : { phaseNames }),
-      ...(phaseAlongside === undefined ? {} : { phaseAlongside }),
-      ...(next.maxConcurrency === undefined ? {} : { maxConcurrency: next.maxConcurrency }),
-      ...(subagentModel === undefined ? {} : { subagentModel }),
-      ...(modelSelections === undefined ? {} : { modelBindings: modelSelections }),
-      ...(scriptPath === undefined ? {} : { scriptPath }),
-      // 重跑的是前驱自己的脚本，它读的正是前驱启动时的实参。
-      inheritArgs: true,
-      trace: traceContext,
-    });
+    amended = await port.amend(
+      {
+        scriptText: script,
+        cwd: this.workingDirectory,
+        predecessorRunId: input.runId,
+        parentSessionId: this.sessionId,
+        toolCallId,
+        ...(phaseNames === undefined ? {} : { phaseNames }),
+        ...(phaseAlongside === undefined ? {} : { phaseAlongside }),
+        ...(next.maxConcurrency === undefined ? {} : { maxConcurrency: next.maxConcurrency }),
+        ...(subagentModel === undefined ? {} : { subagentModel }),
+        ...(modelSelections === undefined ? {} : { modelBindings: modelSelections }),
+        ...(scriptPath === undefined ? {} : { scriptPath }),
+        // 重跑的是前驱自己的脚本，它读的正是前驱启动时的实参。
+        inheritArgs: true,
+        trace: traceContext,
+      },
+      { admission },
+    );
   } catch (error) {
     return {
       ok: false,

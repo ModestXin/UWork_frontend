@@ -1,10 +1,16 @@
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createNodeContextSourceAdapter } from "@zcode/adapters/context";
-import { createNodeExecutionAdapter } from "@zcode/adapters/exec";
+import {
+  createNodeExecutionAdapter,
+  withEnterpriseExecutionAuthorization,
+} from "@zcode/adapters/exec";
 import { createNodeFileSystemAdapter } from "@zcode/adapters/fs";
-import { createNodeWebFetchHttpClientAdapter } from "@zcode/adapters/http";
-import { createNodeSkillAdapter } from "@zcode/adapters/skills";
+import {
+  createNodeWebFetchHttpClientAdapter,
+  withEnterpriseHttpAuthorization,
+} from "@zcode/adapters/http";
+import { createConfiguredSkillPort } from "../skill-runtime.js";
 import type { ConfigResult } from "@zcode/adapters/config";
 import {
   AgentRuntime,
@@ -31,10 +37,13 @@ import {
   type SkillRoot,
   type ToolArtifactStorePort,
   type TraceContext,
+  type EnterpriseSkillsCatalogPort,
+  type EnterpriseToolAuthorizationPort,
   type WorkflowAgentCallInput,
   type WorkflowEscalatePort,
   type WorkflowSubmitPort,
 } from "@zcode/contracts";
+import { createRootTraceContext } from "@zcode/contracts";
 import { collectDisabledPaths } from "../skill-command-overrides.js";
 import { parseProviderQualifiedModelSelection } from "./provider-registry-selection.js";
 import type { ZCodeAppOptions } from "./types.js";
@@ -234,7 +243,7 @@ function createRuntimeDeps(
     // v4 的 `loadPersistedEvents(childSessionId)` 因此命中。私建内存 store 时它永远读不到，
     // transcript 就是永久空白（照 subagent.ts 的 `eventStore: this.eventStore`）。
     eventStore: deps.runtime.getSessionEventStore(),
-    executionPort:
+    executionPort: withEnterpriseExecutionAuthorization(
       deps.appOptions.executionPort ??
       createNodeExecutionAdapter({
         onToolExecResource: deps.appOptions.onToolExecResource,
@@ -247,17 +256,35 @@ function createRuntimeDeps(
         bashOutputTempDir: tmpdir(),
         processEnv: deps.appOptions.env ?? process.env,
       }),
+      {
+        authorization: deps.permissionService.enterpriseAuthorization,
+        sessionId: childSessionId,
+        workspacePath: deps.workingDirectory,
+        workingDirectory: deps.workingDirectory,
+        workspaceIdentity: deps.runtimeConfig.memory?.workspaceIdentity,
+        traceContext,
+      },
+    ),
     fileSystemPort: deps.appOptions.fileSystemPort ?? createNodeFileSystemAdapter(),
-    httpClientPort:
+    httpClientPort: withEnterpriseHttpAuthorization(
       deps.httpClientPort ??
-      deps.appOptions.httpClientPort ??
-      createNodeWebFetchHttpClientAdapter({
-        env: deps.appOptions.env ?? process.env,
-        proxyUrl: deps.configResult.config.network.httpProxy,
-        noProxy: deps.configResult.config.network.noProxy,
-        caCertFile: deps.configResult.config.network.caCertFile,
-        timeoutMs: deps.configResult.config.network.timeout,
-      }),
+        deps.appOptions.httpClientPort ??
+        createNodeWebFetchHttpClientAdapter({
+          env: deps.appOptions.env ?? process.env,
+          proxyUrl: deps.configResult.config.network.httpProxy,
+          noProxy: deps.configResult.config.network.noProxy,
+          caCertFile: deps.configResult.config.network.caCertFile,
+          timeoutMs: deps.configResult.config.network.timeout,
+        }),
+      {
+        authorization: deps.permissionService.enterpriseAuthorization,
+        sessionId: childSessionId,
+        workspacePath: deps.workingDirectory,
+        workingDirectory: deps.workingDirectory,
+        workspaceIdentity: deps.runtimeConfig.memory?.workspaceIdentity,
+        traceContext,
+      },
+    ),
     imageProcessorPort: deps.imageProcessorPort,
     pdfDocumentPort: deps.pdfDocumentPort,
     logger: deps.logger,
@@ -268,7 +295,14 @@ function createRuntimeDeps(
     ...deps.runtime.createChildClientPorts(clientPortsContext),
     permissionService: deps.permissionService,
     sessionStore: deps.sessionStore,
-    skillPort: createWorkflowChildSkillPort(deps),
+    skillPort: createWorkflowChildSkillPort(deps, {
+      authorization: deps.permissionService.enterpriseAuthorization,
+      catalog: deps.appOptions.enterpriseSkillsCatalog,
+      sessionId: childSessionId,
+      workspacePath: deps.workingDirectory,
+      workspaceIdentity: deps.runtimeConfig.memory?.workspaceIdentity,
+      traceContext,
+    }),
     traceContext,
   };
 }
@@ -281,17 +315,36 @@ function createRuntimeDeps(
  */
 export function createWorkflowChildSkillPort(
   deps: Pick<ScriptWorkflowAgentRuntimeDeps, "appOptions" | "configResult" | "pluginSkillRoots">,
+  enterprise?: {
+    authorization?: EnterpriseToolAuthorizationPort;
+    catalog?: EnterpriseSkillsCatalogPort;
+    sessionId?: string;
+    workspacePath?: string;
+    workspaceIdentity?: string;
+    traceContext?: TraceContext;
+  },
 ): SkillPort | undefined {
   if (!deps.configResult.config.features.skill || !deps.configResult.config.skills.enabled) {
     return undefined;
   }
-  return (
-    deps.appOptions.skillPort ??
-    createNodeSkillAdapter({
-      extraRoots: deps.configResult.config.skills.roots,
-      extraResolvedRoots: [...deps.pluginSkillRoots],
-      // 脚本 workflow child runtime 不能绕过用户禁用的 SKILL.md 路径。
-      disabledPaths: collectDisabledPaths(deps.configResult.config.skillOverrides),
-    })
-  );
+  return createConfiguredSkillPort({
+    enabled: deps.configResult.config.features.skill && deps.configResult.config.skills.enabled,
+    port: deps.appOptions.skillPort,
+    roots: deps.configResult.config.skills.roots,
+    // 注入了端口时 roots 只作占位；pluginSkillRoots 缺席（老调用方）不能在这里就抛。
+    ...(deps.pluginSkillRoots === undefined
+      ? {}
+      : { resolvedRoots: [...deps.pluginSkillRoots] }),
+    // 脚本 workflow child runtime 不能绕过用户禁用的 SKILL.md 路径。
+    disabledPaths: collectDisabledPaths(deps.configResult.config.skillOverrides),
+    context: {
+      ...(enterprise?.authorization ? { authorization: enterprise.authorization } : {}),
+      ...(enterprise?.catalog ? { catalog: enterprise.catalog } : {}),
+      // 企业上下文缺席时 createConfiguredSkillPort 直接返回原端口，这些兜底值不会被使用。
+      sessionId: enterprise?.sessionId ?? "workflow-child",
+      workspacePath: enterprise?.workspacePath ?? deps.configResult.config.storage?.dir ?? process.cwd(),
+      ...(enterprise?.workspaceIdentity ? { workspaceIdentity: enterprise.workspaceIdentity } : {}),
+      traceContext: enterprise?.traceContext ?? createRootTraceContext(),
+    },
+  });
 }

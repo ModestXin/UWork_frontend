@@ -14,7 +14,7 @@ const RENDERER_ACTION_TRACE_SHUTDOWN_TIMEOUT_MS = 2_000;
 const RENDERER_ACTION_TRACE_FLUSH_TIMEOUT_MS = 2_000;
 
 export interface RendererActionTraceBroker {
-  enqueue(batch: unknown): boolean;
+  enqueue(batch: unknown, admit?: () => boolean | Promise<boolean>): boolean;
   flush(): Promise<void>;
   shutdown(): Promise<void>;
 }
@@ -29,7 +29,10 @@ export function createRendererActionTraceBroker(options: {
   flushTimeoutMs?: number;
   exportTimeoutMs?: number;
 }): RendererActionTraceBroker {
-  const queue: RendererActionTraceBatchV1[] = [];
+  const queue: Array<{
+    batch: RendererActionTraceBatchV1;
+    admit?: () => boolean | Promise<boolean>;
+  }> = [];
   let drainPromise: Promise<void> | undefined;
   let flushPromise: Promise<void> | undefined;
   let shutdownPromise: Promise<void> | undefined;
@@ -49,14 +52,28 @@ export function createRendererActionTraceBroker(options: {
         queue.splice(0, queue.length);
         return;
       }
-      const batch = queue.shift();
-      if (!batch) continue;
+      const entry = queue.shift();
+      if (!entry) continue;
+      let admitted = false;
+      try {
+        admitted = !entry.admit || (await entry.admit());
+      } catch {
+        /* 无法复核时丢弃，不派发。 */
+      }
+      if (!admitted || closed) continue;
+      const batch = entry.batch;
       const spans = batch.spans.map((span) => toReadableSpan(batch, span));
       let result = await exportSpansWithDeadline(options.exporter, spans, exportTimeoutMs);
       // Bug 原因：deadline 只能停止等待，无法取消已发出的 exporter 请求。超时后立即重试
       // 可能让迟到的首次请求和重试同时成功，因此仅在 exporter 明确失败时重试。
       if (result === "failed" && !closed) {
-        result = await exportSpansWithDeadline(options.exporter, spans, exportTimeoutMs);
+        try {
+          admitted = !entry.admit || (await entry.admit());
+        } catch {
+          admitted = false;
+        }
+        if (admitted && !closed)
+          result = await exportSpansWithDeadline(options.exporter, spans, exportTimeoutMs);
       }
       if (result !== "success" && !closed) {
         options.logger.warn("[renderer-action-trace] batch export failed", {
@@ -80,7 +97,7 @@ export function createRendererActionTraceBroker(options: {
   };
 
   return {
-    enqueue(input) {
+    enqueue(input, admit) {
       if (closed || shuttingDown || !options.exporter) return false;
       let serializedBytes = 0;
       try {
@@ -108,7 +125,7 @@ export function createRendererActionTraceBroker(options: {
         });
         return false;
       }
-      queue.push(parsed.data);
+      queue.push({ batch: parsed.data, ...(admit ? { admit } : {}) });
       scheduleDrain();
       return true;
     },

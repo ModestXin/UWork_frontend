@@ -7,7 +7,7 @@ import {
   type RemoteWorkspaceSession,
 } from "@/store/remoteWorkspaceSessionStore.js";
 import { useResolvedRemoteWorkspaceSessionId } from "@/hooks/useResolvedRemoteWorkspaceSessionId.js";
-import { useTabStore } from "@/store/TabStoreProvider.js";
+import { useTabStore, type TabStoreAccessOptions } from "@/store/TabStoreProvider.js";
 import { isWorkspaceTab } from "@/store/tabStore.js";
 import { REMOTE_WORKSPACE_DISCONNECTED_ERROR_CODE } from "@/lib/remoteWorkspaceServiceError.js";
 
@@ -161,6 +161,7 @@ export function useWorkspaceServicesResolution(
   workspaceIdentity?: string | null,
   remoteTarget?: unknown,
   options?: { unscopedServices?: IServiceAccessor; forceUnscoped?: boolean },
+  tabStoreOptions?: TabStoreAccessOptions,
 ): WorkspaceServicesResolution {
   const currentContextServices = useServices();
   const resolvedRemoteSessionId = useResolvedRemoteWorkspaceSessionId(
@@ -168,22 +169,25 @@ export function useWorkspaceServicesResolution(
     preferredRemoteSessionId,
     workspaceIdentity,
     remoteTarget,
+    tabStoreOptions,
   );
-  const inferredRemoteTarget = useTabStore((state) =>
-    resolveWorkspaceServiceIsRemoteTarget({
-      workspacePath,
-      workspaceIdentity,
-      preferredRemoteSessionId,
-      activeWorkspacePath: state.activeWorkspacePath,
-      activeWorkspaceIdentity: state.activeWorkspaceIdentity,
-      activeTab: (() => {
-        const activeTab = state.activeTabId
-          ? state.tabs.find((tab) => tab.id === state.activeTabId)
-          : null;
-        return activeTab && isWorkspaceTab(activeTab) ? activeTab : null;
-      })(),
-      workspaceTabs: state.tabs.filter(isWorkspaceTab),
-    }),
+  const inferredRemoteTarget = useTabStore(
+    (state) =>
+      resolveWorkspaceServiceIsRemoteTarget({
+        workspacePath,
+        workspaceIdentity,
+        preferredRemoteSessionId,
+        activeWorkspacePath: state.activeWorkspacePath,
+        activeWorkspaceIdentity: state.activeWorkspaceIdentity,
+        activeTab: (() => {
+          const activeTab = state.activeTabId
+            ? state.tabs.find((tab) => tab.id === state.activeTabId)
+            : null;
+          return activeTab && isWorkspaceTab(activeTab) ? activeTab : null;
+        })(),
+        workspaceTabs: state.tabs.filter(isWorkspaceTab),
+      }),
+    tabStoreOptions,
   );
   const isRemoteTarget = options?.forceUnscoped ? false : inferredRemoteTarget;
   const effectiveRemoteSessionId = options?.forceUnscoped ? null : resolvedRemoteSessionId;
@@ -218,6 +222,22 @@ export function useWorkspaceServicesResolution(
     }),
     [connectionKind, effectiveRemoteSessionId, isRemoteTarget, resolvedServices],
   );
+}
+
+export function useWorkspaceOrContextServices(
+  workspacePath: string | null | undefined,
+  preferredRemoteSessionId?: string | null,
+  workspaceIdentity?: string | null,
+): IServiceAccessor {
+  const currentContextServices = useServices();
+  // 冷恢复会在同一组件内补上 workspace；始终订阅同一链，最后才选择服务。
+  const resolution = useWorkspaceServicesResolution(
+    workspacePath,
+    preferredRemoteSessionId,
+    workspaceIdentity,
+  );
+  // 无路径调用原本只读当前 Context，不能因注册了 base host 就改变其 authority。
+  return workspacePath ? resolution.services : currentContextServices;
 }
 
 export function useWorkspaceServices(

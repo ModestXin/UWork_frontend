@@ -9,6 +9,8 @@ import {
   type SessionTaskType,
   type SessionStorePort,
   type TraceContext,
+  type EnterpriseSkillsCatalogPort,
+  type EnterpriseToolAuthorizationPort,
 } from "@zcode/contracts";
 import type { McpTelemetryTracker } from "@zcode/adapters";
 import type { WorkspaceHookPolicyProvider } from "@zcode/core";
@@ -49,6 +51,9 @@ export interface ZCodeProtocolAgentDependencies {
   createSessionEventStore?(sessionId: string): SessionEventStorePort;
   cwd?: string;
   env?: NodeJS.ProcessEnv;
+  enterpriseSkillsCatalog?: EnterpriseSkillsCatalogPort;
+  enterpriseToolAuthorization?: EnterpriseToolAuthorizationPort;
+  enterpriseWorkspace?: ZCodeWorkspaceRef;
   loggerFactory?: LoggerFactory;
   mcpPort?: McpPort;
   /** 资源管理器：`process/childProcesses` 读取 MCP 子进程 pid 与插件归属 */

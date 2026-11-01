@@ -52,6 +52,8 @@ import { useDraftSuggestedPromptItems } from "@/v4/useDraftSuggestedPromptItems.
 import { useDraftSuggestedPluginActionPopover } from "@/v4/useDraftSuggestedPluginActionPopover.js";
 import { getComposerDraftRevision } from "@/v4/composer/composerDraftRevision.js";
 import { useComposerTextInsertApplied } from "@/v4/useComposerTextInsertApplied.js";
+import { revalidatePublishedInstalledPlugin } from "@/v4/publishedSuggestedPlugins.js";
+import { useEnterpriseIdentityStore } from "@/store/enterpriseIdentityStore.js";
 
 type PluginMutationKind = "install" | "enable";
 
@@ -142,6 +144,9 @@ export function ConversationDraftSuggestedPromptsContainer({
     clientScenesService: resolution.services.clientScenesService,
     rpcReady: resolution.rpcReady,
     workspaceKey,
+    workspacePath,
+    workspaceIdentity,
+    remoteSessionId,
   });
   const items = useMemo(
     () =>
@@ -588,6 +593,38 @@ export function ConversationDraftSuggestedPromptsContainer({
       // 在旧 operation 取消收敛后再取基线：旧 operation 可能刚把自己的普通 prompt
       // 交给 Composer 消费；它属于本次推荐流程的程序性写入，不应让新推荐项被误判为用户编辑。
       const draftRevision = getComposerDraftRevision(workspacePath, workspaceIdentity);
+
+      if (item.plugin?.installedOnly) {
+        const identity = useEnterpriseIdentityStore.getState();
+        const installed = await revalidatePublishedInstalledPlugin(
+          plugin.stableId,
+          async () =>
+            (
+              await resolution.services.pluginManagementService.getPluginReferenceCatalog(
+                targetParams(),
+              )
+            ).plugins,
+        );
+        const currentIdentity = useEnterpriseIdentityStore.getState();
+        if (
+          requestVersion !== requestVersionRef.current ||
+          currentIdentity.owner !== identity.owner ||
+          currentIdentity.view?.revision !== identity.view?.revision ||
+          getComposerDraftRevision(workspacePath, workspaceIdentity) !== draftRevision
+        )
+          return;
+        // 撤销、禁用或未安装都只回到普通 prompt；此分支永不进入市场刷新/安装流程。
+        if (installed)
+          replaceWithResolvedPluginAndPrompt(
+            plugin,
+            prompt,
+            requestVersion,
+            draftRevision,
+            item.iconName,
+          );
+        else replacePlainPrompt(prompt, requestVersion, draftRevision);
+        return;
+      }
 
       const operation = createDraftSuggestedPluginOperation(requestVersion);
       activeOperationRef.current = operation;

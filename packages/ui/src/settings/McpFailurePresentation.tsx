@@ -3,12 +3,8 @@ import type { McpServerFailureKind } from "@zcode/shared";
 import { Button } from "@/components/ui/button.js";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover.js";
 import { useZCodeIntl } from "@/i18n/IntlProvider.js";
-
-export function resolveMcpFailureMessageId(
-  failureKind: McpServerFailureKind | undefined,
-): `settings.mcp.failure.${McpServerFailureKind}` {
-  return `settings.mcp.failure.${failureKind ?? "connection_failed"}`;
-}
+import { resolveMcpFailureMessageId } from "./mcpFailureCopy.js";
+export { resolveMcpFailureMessageId } from "./mcpFailureCopy.js";
 
 export function McpFailurePresentation({
   error,
@@ -19,7 +15,7 @@ export function McpFailurePresentation({
 }) {
   const { intl } = useZCodeIntl();
   const message = intl.formatMessage({
-    id: resolveMcpFailureMessageId(failureKind),
+    id: resolveMcpFailureMessageId(failureKind, error),
   });
   const detailsLabel = intl.formatMessage({
     id: "settings.mcp.failure.technicalDetails",

@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "target": "ES2024",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": ["node"],
+    "paths": {
+      "@zcode/contracts": ["./packages/contracts/src/index.ts"],
+      "@zcode/contracts/browser-control": [
+        "./packages/contracts/src/interfaces/browser-control.port.ts"
+      ],
+      "@zcode/contracts/*": ["./packages/contracts/src/*"],
+      "@zcode/core": ["./packages/core/src/index.ts"],
+      "@zcode/adapters/exec": ["./packages/adapters/src/exec/index.ts"],
+      "@zcode/dynamic-workflow": ["./packages/dynamic-workflow/src/index.ts"],
+      "@zcode/dynamic-workflow/*": ["./packages/dynamic-workflow/src/*"],
+      "@zcode/shared-types": ["./packages/shared-types/src/index.ts"]
+    }
+  },
+  "include": ["packages/core/test/**/*.test.ts"]
+}

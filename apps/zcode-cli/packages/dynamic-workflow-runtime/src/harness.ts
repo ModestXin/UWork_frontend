@@ -46,6 +46,11 @@ import {
 import { type ChildMessage, type ChildPayload, type ResponseMessage } from "./protocol.js";
 import { renderChildEntry } from "./child-source.js";
 import { writeChildEntryFile, type HarnessWarning } from "./child-entry-file.js";
+import {
+  abortedBeforeEngine,
+  checkHarnessAdmission,
+  harnessAdmissionError,
+} from "./harness-admission.js";
 
 /** driver 工厂：harness 先建 sink（引擎的向上回报面），交给工厂造 driver，再以该 driver 建引擎。 */
 export type DriverFactory = (sink: WorkflowReportSink) => WorkflowDriver;
@@ -83,6 +88,9 @@ export interface RunControlBinding {
  * 这份自洽性归调用方所有。
  */
 export interface RunWorkflowOptions {
+  /** 私有宿主准入，不进入 lowered/payload；写入口与 spawn 之间再次核对。 */
+  beforePrepare?: (signal?: AbortSignal) => Promise<void>;
+  beforeSpawn?: (signal?: AbortSignal) => Promise<void>;
   /**
    * 作者写的 workflow 脚本源码，两个用途：
    * 1. `lowered` 缺省时由 harness lower 它得到执行体；
@@ -207,6 +215,13 @@ const STDERR_LIMIT = 64 * 1024;
  * 两者都绝不静默吞掉。
  */
 export async function runWorkflowScript(options: RunWorkflowOptions): Promise<RunSettlement> {
+  // Engine 构造会 createRun，故首次准入必须更早；迟到 allowed 不能越过取消。
+  try {
+    await checkHarnessAdmission(options.beforePrepare, options.signal);
+  } catch (cause) {
+    if (options.signal?.aborted) return abortedBeforeEngine(options.signal);
+    throw harnessAdmissionError(cause);
+  }
   const lowered = resolveLowered(options);
   const runId = options.runId ?? "run";
 
@@ -276,6 +291,16 @@ export async function runWorkflowScript(options: RunWorkflowOptions): Promise<Ru
       source: renderChildEntry(payload, { runId }),
       ...(options.onWarning === undefined ? {} : { onWarning: options.onWarning }),
     });
+    try {
+      await checkHarnessAdmission(options.beforeSpawn, options.signal);
+    } catch (cause) {
+      if (options.signal?.aborted) {
+        const stopped = abortedBeforeEngine(options.signal);
+        if (stopped.status === "stopped")
+          engine.stop(stopped.reason, stopped.error, stopped.supersededBy);
+      } else engine.fail(harnessAdmissionError(cause));
+      return engine.settled;
+    }
     child = spawn(
       process.execPath,
       options.childSpawn === undefined

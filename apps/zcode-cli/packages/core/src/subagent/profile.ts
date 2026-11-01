@@ -20,6 +20,21 @@ export type BuiltInSubagentModelSelectionOverrides = Partial<
   Record<typeof DEFAULT_SUBAGENT_TYPE | typeof EXPLORE_AGENT_TYPE, ModelSelection>
 >;
 
+/**
+ * 企业受管 profile 的个人别名前缀。`enterprise` 来源由企业资产所有者注入
+ * （只读、进程内、无 path），不来自磁盘 markdown，因此设置页不会把它当作可编辑的本地文件。
+ */
+export const PERSONAL_AGENT_PROFILE_PREFIX = "personal:";
+
+/** 名称校验与实际解析共用一套规范化，保留前缀不能被 Unicode/分隔符变体绕过。 */
+export function normalizeAgentTypeForMatch(agentType: string): string | undefined {
+  const normalized = agentType
+    .trim()
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[\p{White_Space}\p{Pd}_]+/gu, "");
+  return normalized.length > 0 ? normalized : undefined;
+}
 export function createBuiltInExploreAgentProfile(
   options: { modelSelection?: ModelSelection } = {},
 ): AgentProfile {

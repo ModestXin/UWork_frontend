@@ -60,10 +60,10 @@ export function buildRegistryModelSelectGroups(
         ...(provider.config.logo ? { logo: provider.config.logo } : {}),
         ...(labelBadge ? { labelBadge } : {}),
         ...(accountPresentation ? { directItems: true } : {}),
-        items: provider.models.map(({ modelId, config }) => ({
+        items: provider.models.map(({ modelId, displayName, config }) => ({
           key: `registry-provider:${provider.providerId}:${modelId}`,
           value: encodeCustomModelValue(provider.providerId, modelId),
-          name: modelId,
+          name: displayName ?? modelId,
           ...(shouldShowModelVisionBadge(
             modelId,
             config.properties?.inputFormat?.supportsImage,

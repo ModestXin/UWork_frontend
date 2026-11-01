@@ -832,10 +832,10 @@ export function createConversationV4Gateway(
       if (!input) return null;
       const kind = input.kind;
       const record = context.sessions.get(sessionId);
-      if (record?.persistence === "deferred") {
-        // session_input 有 session 外键；draft 要到 startPromptTurn 后台阶段才持久化，
-        // 如果先写 ledger 会直接 FK 失败，accepted 前仍没有权威记录。因此 admission
-        // 先走 runtime 的统一首发持久化边界，再落 ledger，随后 handler 只负责执行。
+      if (record) {
+        // record.persistence 只是协议投影：legacy 默认创建虽标 immediate，runtime
+        // 可能还未落 session 行，直接写 session_input 会 FK 失败。始终先调用唯一
+        // runtime owner 的幂等持久化入口；已持久会话快速返回，deferred 仍只在首发提升。
         await record.app.runtime.ensureSessionPersistedForExternalActivity(input.text ?? "", {
           traceContext: record.traceContext,
         });

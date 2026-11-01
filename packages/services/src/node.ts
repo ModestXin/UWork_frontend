@@ -44,7 +44,28 @@ import {
   PERSONAL_PROVIDER_CONFIG_FILE_NAME,
 } from "@zcode/provider-node";
 import { UCAS_PROVIDER_ID } from "@zcode/provider";
-import { getAppConfigDir as resolveAppConfigDir, getUworkUserCliConfigPath } from "./paths.js";
+import {
+  getAppConfigDir as resolveAppConfigDir,
+  getUworkUserCliConfigPath,
+  getUworkUserStorageRoot,
+} from "./paths.js";
+import { ZCODE_ENTERPRISE_POLICY_REQUIRED_ENV_KEY } from "@zcode/shared";
+import { createUWorkToolAuthorizationResolver } from "./enterprise-identity/uworkToolAuthorization.js";
+import { createUWorkBackendSession } from "./enterprise-identity/uworkBackendSession.js";
+import {
+  createClientPresentationReader,
+  readClientTurnPresentation,
+} from "./enterprise-identity/clientPresentation.js";
+import { IEnterpriseConsoleService } from "./enterprise-console/contract.js";
+import { createEnterpriseConsoleService } from "./enterprise-console/module.js";
+import { createEnterpriseModelRelay } from "./enterprise-model-relay/relay.js";
+import { createEnterpriseConnectorRelay } from "./enterprise-assets/connectorRelay.js";
+import { createEnterpriseAssetsHost } from "./enterprise-assets/enterpriseAssetsHost.js";
+import { attachEnterpriseAssetsLifecycle } from "./enterprise-assets/enterpriseAssetsLifecycle.js";
+import {
+  readEnterpriseIdentityAuthority,
+  type EnterpriseIdentityAuthority,
+} from "./enterprise-identity/identityServiceLifecycle.js";
 import {
   createHasExistingLocalTask,
   hasAnyAgentSessionRow,
@@ -294,6 +315,7 @@ export { runStorageScan } from "./storage/adapters/inProcessScanRunner.js";
 export { createCodingPlanSubscriptionService } from "./coding-plan-subscription/codingPlanSubscriptionService.js";
 export { createClientConfigService } from "./client-config/clientConfigService.js";
 export { createClientScenesService } from "./client-scenes/clientScenesService.js";
+export { readEnterpriseIdentityTurnPresentation } from "./enterprise-identity/identityServiceLifecycle.js";
 export { createSkillsService } from "./skills/skillsService.js";
 export { createSkillSyncService } from "./skill-sync/skillSyncService.js";
 export { createMcpSyncService } from "./mcp-sync/mcpSyncService.js";
@@ -397,6 +419,12 @@ import {
   type IConversationShareService as IConversationShareServiceType,
 } from "./conversation-share/conversationShare.js";
 import {
+  createUWorkProviderSettingsPolicy,
+  discoverPolicyAwareProviderModels,
+} from "./model-provider/uworkProviderSettingsPolicy.js";
+import { providerSettingsTrustedGatewayProvisioning } from "./model-provider/providerFacadeServices.js";
+import { createUWorkSharePorts } from "./conversation-share/uworkPublicationPolicy.js";
+import {
   ConversationShareService,
   conversationShareConnectionScopeFactory,
 } from "./conversation-share/conversationShareService.js";
@@ -428,6 +456,7 @@ import {
   type UcasGatewayProvisioningTarget,
 } from "./ucas-gateway/contract.js";
 import { createUcasGatewayService } from "./ucas-gateway/ucasGatewayService.js";
+import { gatewayCatalogAuthority } from "./ucas-gateway/gatewayCatalogLifecycle.js";
 import { createUcasGatewayStore } from "./ucas-gateway/ucasGatewayStore.js";
 import { withFileLock as withEnterpriseIdentityFileLock } from "@zcode/shared/node";
 import { IUsageStatsService } from "./usage-stats/usageStats.js";
@@ -780,6 +809,11 @@ const managedHostApiNetworkTransports = new WeakMap<ServiceCollection, HostApiNe
 const managedEnterpriseIdentities = new WeakMap<
   ServiceCollection,
   import("./enterprise-identity/contract.js").IEnterpriseIdentityService
+>();
+const managedEnterpriseModelRelays = new WeakMap<ServiceCollection, { dispose(): void }>();
+const managedEnterpriseAssets = new WeakMap<
+  ServiceCollection,
+  ReturnType<typeof attachEnterpriseAssetsLifecycle>
 >();
 
 export function registerManagedCuaHelperHostForDispose(
@@ -1700,8 +1734,9 @@ export function createLocalServices(options: {
     | undefined;
   const providerRuntime = createProviderRuntimeFromConfigRuntime({
     configRuntime: providerConfigRuntime,
-    discoverModels: (config) =>
-      discoverProviderModels(config, { request: hostApiNetworkTransport.fetch }),
+    settingsPolicy: createUWorkProviderSettingsPolicy(() => enterpriseBackendSession),
+    discoverModels: (config, scope) =>
+      discoverPolicyAwareProviderModels(config, hostApiNetworkTransport.fetch, scope),
     accountSource: accountProviderConfigSource,
     modelSelectionConfiguredDefaultSource,
     disposeModelSelectionConfiguredDefaultSource: () =>
@@ -1722,7 +1757,8 @@ export function createLocalServices(options: {
   });
   const ucasGatewayProvisioning: UcasGatewayProvisioningTarget = {
     apply: async (input) => {
-      const applied = await providerRuntime.providerSettings.applyUcasGatewayProvisioning(input);
+      const applied =
+        await providerRuntime.providerSettings[providerSettingsTrustedGatewayProvisioning](input);
       return {
         apiKeyApplied: applied.apiKeyApplied,
         hasApiKey: applied.hasApiKey,
@@ -1739,9 +1775,58 @@ export function createLocalServices(options: {
       );
     },
   };
+  let readEnterpriseAuthority: () => EnterpriseIdentityAuthority | undefined = () => undefined;
+  const enterpriseBackendSession = createUWorkBackendSession({
+    resolveConfig: async () =>
+      options.serviceAuthorityMode === "desktop-local"
+        ? loadWeComIdentityConfig(
+            join(resolveAppConfigDir(), "enterprise-identity.json"),
+            options.enterpriseIdentityBuiltinConfigFilePath,
+          )
+        : undefined,
+    readAuthority: () => readEnterpriseAuthority(),
+    readPersistedSession: () => enterpriseIdentitySessionStore.read(),
+    fetchImpl: (input, init) => hostApiNetworkTransport.fetch(input, init),
+  });
+  const readClientPresentation = createClientPresentationReader(enterpriseBackendSession);
+  const enterpriseToolAuthorization = createUWorkToolAuthorizationResolver({
+    backendSession: enterpriseBackendSession,
+  });
+  const enterpriseAssetsLogger = createServiceLogger("enterprise-assets");
+  const enterpriseAssetsHost = createEnterpriseAssetsHost({
+    backendSession: enterpriseBackendSession,
+    storageDirectory: getUworkUserStorageRoot(),
+    onCacheEvent: (event) => {
+      const write =
+        event.status === "failed"
+          ? enterpriseAssetsLogger.warn
+          : event.operation === "verify"
+            ? enterpriseAssetsLogger.debug
+            : enterpriseAssetsLogger.info;
+      write(event.traceId, "Enterprise asset cache outcome", event);
+    },
+  });
+  const enterpriseModelRelay = createEnterpriseModelRelay({
+    backendSession: enterpriseBackendSession,
+  });
+  const enterpriseConnectorRelay = createEnterpriseConnectorRelay({
+    backendSession: enterpriseBackendSession,
+    assets: enterpriseAssetsHost,
+  });
   const ucasGatewayService = createUcasGatewayService({
     store: ucasGatewayStore,
     identitySessionStore: enterpriseIdentitySessionStore,
+    readIdentitySession: async () => (await enterpriseIdentitySessionStore.read()).session,
+    // 网关复用同一身份owner的即时撤销代际，持久化Token不能允许退出后的迟到写入。
+    readIdentityAuthority: () => readEnterpriseAuthority(),
+    resolveBackend: async () => {
+      if (options.serviceAuthorityMode !== "desktop-local") return "ucas";
+      const config = await loadWeComIdentityConfig(
+        join(resolveAppConfigDir(), "enterprise-identity.json"),
+        options.enterpriseIdentityBuiltinConfigFilePath,
+      );
+      return config?.backend ?? "ucas";
+    },
     resolveApiBaseUrl: async () => {
       // 非 desktop-local（Web/远控）不启用本机企业配置读取，网关能力保持未配置空态。
       if (options.serviceAuthorityMode !== "desktop-local") return undefined;
@@ -1842,7 +1927,10 @@ export function createLocalServices(options: {
       }),
   };
   // mcpSync/hooks 里引用 zcodeAgentService 的闭包是惰性调用，声明顺序不影响初始化。
-  const skillsService = createSkillsService({ isDesktopRuntime: true });
+  const skillsService = createSkillsService({
+    isDesktopRuntime: true,
+    backendSession: enterpriseBackendSession,
+  });
   const mcpSyncService = createMcpSyncService({
     // mcp/list 的 host 消费点收拢到 mcpSync 服务；真实状态检查仍在 agent 进程。
     listMcpServerStatuses: (params) => zcodeAgentService.listMcpServerStatuses(params),
@@ -2538,6 +2626,10 @@ export function createLocalServices(options: {
     },
     // 官方 Server MCP 身份头：host 是唯一身份权威，Agent 经反向请求索取。
     // Provider 存在性读取正式 Model Selection View；不恢复旧 Provider Snapshot。
+    enterpriseToolAuthorization,
+    enterpriseAssets: enterpriseAssetsHost,
+    enterpriseConnectors: enterpriseConnectorRelay,
+    enterpriseModels: enterpriseModelRelay,
     officialMcpAuthHeadersResolver: createOfficialMcpAuthHeadersResolver({
       accountRequestAuthService,
       credentialService,
@@ -2645,6 +2737,8 @@ export function createLocalServices(options: {
           zcodeBuiltinFilePath: await providerConfigRuntime.resolveZCodeBuiltinActiveFilePath(),
           personalFilePath: join(resolveAppConfigDir(), PERSONAL_PROVIDER_CONFIG_FILE_NAME),
         }),
+        [ZCODE_ENTERPRISE_POLICY_REQUIRED_ENV_KEY]:
+          options.serviceAuthorityMode === "desktop-local" ? "1" : "0",
       };
     },
     ...(!isDesktopAttachedRemote
@@ -2654,10 +2748,14 @@ export function createLocalServices(options: {
       ? { sessionRuntimePreferencesAuthority: "external" as const }
       : {
           sessionRuntimePreferencesAuthority: "local" as const,
-          resolveSessionRuntimePreferences: async (scope) => {
+          resolveSessionRuntimePreferences: async (scope, readOptions) => {
             // 预算已统一，不能把可选远端配置作为本地/手机 shared-host 建会话的前置条件。
             const settings = await settingService.get();
             const modelContextBudgetStrategy = DEFAULT_ZCODE_MODEL_CONTEXT_BUDGET_STRATEGY;
+            const presentation =
+              scope === "turn-presentation"
+                ? await readClientTurnPresentation(readClientPresentation, readOptions?.signal)
+                : undefined;
             return {
               askUserQuestionAutoResolutionEnabled:
                 settings.askUserQuestionAutoResolutionEnabled !== false,
@@ -2665,6 +2763,7 @@ export function createLocalServices(options: {
               toolSearchMode: settings.toolSearchMode ?? "off",
               memoryEnabled: settings.memoryEnabled === true,
               modelContextBudgetStrategy,
+              ...presentation,
               // user-execution 只消费 Shell；共享默认策略是统一 result schema 的兼容占位，
               // 不会覆盖 runtime-materialization 阶段已经固定的 strategy。
               ...(scope === "user-execution" && settings.integratedTerminalShell
@@ -2852,7 +2951,9 @@ export function createLocalServices(options: {
     authorizeLocalMediaPreviewPath: options?.authorizeLocalMediaPreviewPath,
     createLocalMediaPreviewUrl: buildLocalMediaPreviewUrl,
   });
+  const sharePorts = createUWorkSharePorts(enterpriseBackendSession);
   const conversationShareClient = new ConversationShareHttpClient({
+    managedTransport: sharePorts.managedTransport,
     // 分享运行时始终走真实 API；测试/Mock 场景应在 service 单测或 Web fixture 中显式注入，
     // 不能让开发环境默认生成仅存在于进程内存的 mock-share 链接。
     apiClient,
@@ -2874,6 +2975,7 @@ export function createLocalServices(options: {
         zcodeAgentService,
         zcodeSessionService,
         client: conversationShareClient,
+        publicationPolicy: sharePorts.publicationPolicy,
         artifactSource: createLocalConversationShareArtifactSource(),
       });
   // 注册链上的懒工厂（如 OffPeak）会各自创建 tasks-index sqlite repo；先收集到本数组，
@@ -2882,7 +2984,7 @@ export function createLocalServices(options: {
   const marketingAssets = createMarketingAssetRegistry({
     allowLoopback: ZCODE_ENV === "test" || process.env.NODE_ENV === "development",
   });
-  const services = new ServiceCollection()
+  const services: ServiceCollection = new ServiceCollection()
     .register(
       IMarketingTouchService,
       createMarketingTouchService({
@@ -2947,6 +3049,7 @@ export function createLocalServices(options: {
       IEnterpriseIdentityService,
       createEnterpriseIdentityService({
         credentials: credentialService,
+        readClientPresentation,
         adapter: options.enterpriseIdentityAdapter,
         // 网关服务读取同一份会话库；身份服务仍是唯一写者与验证者。
         sessionStore: enterpriseIdentitySessionStore,
@@ -2966,6 +3069,7 @@ export function createLocalServices(options: {
     )
     .register(IUcasGatewayService, ucasGatewayService)
     .register(IImService, imService)
+    .register(IEnterpriseConsoleService, createEnterpriseConsoleService(enterpriseBackendSession))
     .register(
       IUsageStatsService,
       createUsageStatsService({
@@ -2986,9 +3090,17 @@ export function createLocalServices(options: {
           appVersion: ZCODE_VERSION,
           platform: `${process.platform}-${process.arch}`,
         }),
+        readClientPresentation: () =>
+          services.get(IEnterpriseIdentityService).readClientPresentation(),
       }),
     )
-    .register(IClientScenesService, createClientScenesService({ apiClient }))
+    .register(
+      IClientScenesService,
+      createClientScenesService({
+        readClientPresentation: () =>
+          services.get(IEnterpriseIdentityService).readClientPresentation(),
+      }),
+    )
     .register(
       IOffPeakTaskService,
       (() => {
@@ -3200,7 +3312,10 @@ export function createLocalServices(options: {
     )
     .register(IMemoryService, createMemoryService())
     .register(IOutputStyleService, createOutputStyleService())
-    .register(ISettingsSyncService, createSettingsSyncService({ settingService }))
+    .register(
+      ISettingsSyncService,
+      createSettingsSyncService({ settingService, backendSession: enterpriseBackendSession }),
+    )
     .register(
       IFeedbackService,
       createFeedbackService({
@@ -3208,6 +3323,10 @@ export function createLocalServices(options: {
         apiClient,
         credentialService,
         oauthService,
+        readClientPresentation: () =>
+          services.get(IEnterpriseIdentityService).readClientPresentation(),
+        readIdentityAuthority: () =>
+          readEnterpriseIdentityAuthority(services.get(IEnterpriseIdentityService)),
       }),
     )
     .register(IPromptAttachmentTransferService, createLocalPromptAttachmentTransferService());
@@ -3222,6 +3341,25 @@ export function createLocalServices(options: {
   });
   registerHostApiNetworkTransportForDispose(services, hostApiNetworkTransport);
   managedEnterpriseIdentities.set(services, services.get(IEnterpriseIdentityService));
+  readEnterpriseAuthority = () =>
+    readEnterpriseIdentityAuthority(services.get(IEnterpriseIdentityService));
+  ucasGatewayService[gatewayCatalogAuthority].bindIdentityChanges((listener) =>
+    services.get(IEnterpriseIdentityService).onDidChange(listener),
+  );
+  providerRuntime.bindGatewayCatalogAuthority(ucasGatewayService[gatewayCatalogAuthority]);
+  managedEnterpriseModelRelays.set(services, enterpriseModelRelay);
+  managedEnterpriseAssets.set(
+    services,
+    attachEnterpriseAssetsLifecycle({
+      identity: services.get(IEnterpriseIdentityService),
+      assets: enterpriseAssetsHost,
+      readAuthority: readEnterpriseAuthority,
+      onDiagnostic: (event) =>
+        enterpriseAssetsLogger.warn(event.traceId, "Enterprise asset synchronization unavailable", {
+          code: event.code,
+        }),
+    }),
+  );
   // disposer 注册完成后才排预热。若 createLocalServices 中途抛错，不能留下一个无人持有、却会在当前
   // 调用栈结束后才创建的高权限 Helper；若返回后立即 dispose，terminal fence 会先于 acquire 生效。
   // Helper 懒启动：不预热——Helper 由 SDK 首次 CUA 调用拉起（spawn env 注入
@@ -3369,7 +3507,18 @@ export function disposeServiceResources(services: ServiceCollection): void {
   (
     services.getOptional(IGenUiService) as (IGenUiService & { dispose?(): void }) | undefined
   )?.dispose?.();
-  // Bugfix: host process 退出前以前没有统一遍历本地服务做资源回收，
+  managedEnterpriseModelRelays.get(services)?.dispose();
+  managedEnterpriseModelRelays.delete(services);
+  void managedEnterpriseAssets
+    .get(services)
+    ?.disposeAllAndWait()
+    .catch(() => {});
+  managedEnterpriseAssets.delete(services);
+  const identity = managedEnterpriseIdentities.get(services);
+  if (identity) {
+    void disposeEnterpriseIdentityService(identity);
+    managedEnterpriseIdentities.delete(services);
+  }
   // terminal/task wrapper 这类会拉起子进程的服务只能等宿主进程自己结束，时序上可能留下短暂残留。
   // 这里集中调用各服务的本地 disposeAll 钩子，把“退出 app = 回收所有托管资源”落成机械动作。
   const disposableServices = [
@@ -3411,6 +3560,15 @@ export async function disposeServiceResourcesAndWait(services: ServiceCollection
   (
     services.getOptional(IGenUiService) as (IGenUiService & { dispose?(): void }) | undefined
   )?.dispose?.();
+  managedEnterpriseModelRelays.get(services)?.dispose();
+  managedEnterpriseModelRelays.delete(services);
+  const assetDisposal = managedEnterpriseAssets.get(services)?.disposeAllAndWait();
+  const identity = managedEnterpriseIdentities.get(services);
+  // 两个 owner 在任何 await 前同时失效，避免等缓存 IO 时仍准入新的工具。
+  const identityDisposal = identity ? disposeEnterpriseIdentityService(identity) : undefined;
+  await Promise.all([assetDisposal, identityDisposal]);
+  managedEnterpriseAssets.delete(services);
+  managedEnterpriseIdentities.delete(services);
   // app 关闭时 host 需要等 agent 进程树完成 graceful + force 清理。
   // 旧的同步 dispose 会在 host 退出时丢掉强杀 timer，导致 zcode-cli/app-server 变成孤儿进程。
   const disposableServices = [

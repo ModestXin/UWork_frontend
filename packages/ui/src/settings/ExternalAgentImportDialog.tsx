@@ -55,6 +55,7 @@ import {
 import type { ISettingsSyncService } from "@zcode/services";
 import { useZCodeIntl } from "@/i18n/IntlProvider.js";
 import { logger } from "@/logger.js";
+import { resolveSkillsFailureMessageId } from "@/settings/skillsFailureCopy.js";
 
 type ImportStep = "selection" | "importing" | "complete";
 export type ImportResourceCategory = Extract<SettingsSyncCategory, "skills" | "commands" | "plugins" | "mcpServers">;
@@ -68,6 +69,19 @@ type ImportItemResult =
   | SettingsSyncCommandImportResult
   | SettingsSyncPluginImportResult
   | SettingsSyncMcpServerImportResult;
+
+function ImportFailureMessage({
+  category,
+  error,
+}: {
+  category: ImportResourceCategory;
+  error: string;
+}) {
+  const { intl } = useZCodeIntl();
+  // 原生迟到提交已正确拒绝时，导入页也应复用技能权限提示；日志仍保留原始诊断。
+  const messageId = category === "skills" ? resolveSkillsFailureMessageId(error) : undefined;
+  return messageId ? intl.formatMessage({ id: messageId }) : error;
+}
 
 interface ExternalAgentImportDialogProps {
   open: boolean;
@@ -635,7 +649,7 @@ function ExternalAgentImportDialog({
               <div className="h-full overflow-auto p-3">
                 {displayError ? (
                   <div className="mb-3 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-ui-base text-foreground">
-                    {displayError}
+                    <ImportFailureMessage category={category} error={displayError} />
                   </div>
                 ) : null}
 
@@ -774,7 +788,7 @@ export function ExternalAgentImportSelectionPanel({
         <div className="h-full overflow-auto p-3">
           {state.error ? (
             <div className="mb-3 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-ui-base text-foreground">
-              {state.error}
+              <ImportFailureMessage category={category} error={state.error} />
             </div>
           ) : null}
           {state.loading ? (

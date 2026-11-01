@@ -5,6 +5,10 @@ dist-release/
 # Bugfix: macOS CI 按架构隔离 electron-builder 输出目录，这些仍是构建产物。
 packages/desktop/dist-*/
 out/
+# 隔离测试复制构建产物时会留出 "dist 2"、"out 3" 这类同名副本：它们与
+# dist/、out/ 同为可再生产物，不入库；否则 oxlint 会去扫描副本里的压缩产物。
+dist [0-9]*/
+out [0-9]*/
 prebuilds/
 bundled-resources/
 mock-cdn/

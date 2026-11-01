@@ -42,6 +42,7 @@ import {
   parseAsarListWithPackState,
 } from "./scripts/desktop-native-package-policy.mjs";
 import { replaceAppAsarFromStaging } from "./scripts/app-asar-repack.mjs";
+import { synchronizeMacAsarIntegrityMetadata } from "./scripts/macos-asar-integrity-metadata.mjs";
 import {
   patchNsisInstallSectionFile,
   restoreNsisInstallSectionFileSync,
@@ -540,6 +541,12 @@ function signWindowsBrowserImportHelper(context) {
 /** @type {import("electron-builder").Configuration} */
 export default {
   appId: desktopProductIdentity.appId,
+  ...(targetPlatform.os === "linux" && targetPlatform.arch === "arm64"
+    ? {
+        // legacy ARM64 runtime 动态依赖开发库 libz.so；选用 builder 已支持且校验归档的便携工具集。
+        toolsets: { appimage: "1.0.2" },
+      }
+    : {}),
   // Linux deb 打包（fpm）会校验 package metadata 中的 homepage、author.email、maintainer。
   // CI 环境下若这些字段缺失会在产物阶段直接失败。这里统一在构建配置补齐，避免依赖外部注入。
   extraMetadata: {
@@ -655,6 +662,12 @@ export default {
     runTimedSync("afterPack:assertPackagedNodePtyPrebuild", () =>
       assertPackagedNodePtyPrebuild(context),
     );
+    // 修复（适配版）：afterPack 会重写 app.asar，Info.plist 里的 ElectronAsarIntegrity
+    // 必须按最终 header 重算，否则打包后的 macOS 包会因完整性声明不匹配而拒绝加载。
+    await synchronizeMacAsarIntegrityMetadata({
+      electronPlatformName: context.electronPlatformName,
+      appAsarPath: resolveAppAsarPath(context),
+    });
     runTimedSync("afterPack:assertPackagedCuaSharp", () => assertPackagedCuaSharp(context));
     runTimedSync("afterPack:assertPackagedCuaKoffi", () => assertPackagedCuaKoffi(context));
     runTimedSync("afterPack:assertPackagedCuaHelper", () => assertPackagedCuaHelper(context));
@@ -713,7 +726,7 @@ export default {
             // CUA 权限浮窗的吸附数据源（CGWindowListCopyWindowInfo，不需要任何 TCC 权限）。
             // 主进程按 process.resourcesPath 解析；缺失时 watcher fail-open，浮窗仍可用
             // 只是不吸附，所以这里不做存在性断言。
-            from: "resources/macos-window-bounds/zcode-window-bounds",
+            from: `resources/macos-window-bounds/zcode-window-bounds-${targetPlatform.arch}`,
             to: "macos-window-bounds/zcode-window-bounds",
           },
         ]
@@ -892,17 +905,22 @@ export default {
     depends: PACMAN_RUNTIME_DEPENDENCIES,
     // Electron Builder 默认把 pacman target 命名为 .pacman；Arch 原生包的标准扩展名是 .pkg.tar.zst。
     artifactName: buildDesktopArtifactName("linux", "pkg.tar.zst"),
+    // 仅改扩展名仍会得到 builder 默认的 xz；26.8.1 通用枚举未含 zstd，沿原 FPM 参数显式选择。
+    fpm: ["--pacman-compression", "zstd"],
   },
   rpm: {
     // 与 deb 同一约束：生产版与 Preview 必须是两个独立 rpm 包，否则 dnf 会把另一 flavor 当成升级替换。
     // rpm 面向 RHEL 8+（glibc 2.28）分发；整包 glibc 下限由 node-pty prebuild 与 bfs/ugrep 抬到 2.28，
     // Electron 41 主二进制只引用到 2.25，不会更高。fpm 产 rpm 需要构建机提供 rpmbuild 与 xz。
     packageName: desktopProductIdentity.linuxPackageName,
+    // 原模板的 alternatives 卸载 target 与安装值不一致，且留下 RPM 未拥有的空目录。
+    afterRemove: "scripts/linux-rpm-after-remove.tpl",
     // electron-builder 的 rpm 默认 Requires（gtk3/nss/libXtst 等）不包含 Electron ELF 实际
     // DT_NEEDED 的 mesa-libgbm 与 alsa-lib；rockylinux:8 最小化容器实测装完后启动报
     // libgbm.so.1 缺失。这里用 fpm 追加 -d（在默认 Requires 之后累积），不能用 depends——
     // depends 会整组替换默认 Requires 集。
-    fpm: ["-d", "mesa-libgbm", "-d", "alsa-lib"],
+    // RPM 最终卸载的空目录清理由 find 执行，最小 RHEL 也必须显式具备 findutils。
+    fpm: ["-d", "mesa-libgbm", "-d", "alsa-lib", "-d", "findutils"],
   },
   dmg: {
     // 当前安装包携带的运行时资源（尤其 agent node_modules）体积已超过默认 DMG 估算值。

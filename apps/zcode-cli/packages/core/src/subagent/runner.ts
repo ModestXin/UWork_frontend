@@ -47,6 +47,7 @@ import { dirname, join } from "node:path";
 import {
   isBuiltInExploreAgentProfile,
   normalizeAgentProfiles,
+  normalizeAgentTypeForMatch,
   type AgentProfile,
 } from "./profile.js";
 import { EXPLORE_AGENT_ALLOWED_TOOLS } from "./explore-tools.js";
@@ -772,7 +773,9 @@ function resolveAgentProfileByType(
   if (!requestedNormalized) return { availableAgentTypes, kind: "not_found" };
 
   const normalizedMatches = profiles.filter(
-    (candidate) => normalizeAgentTypeForMatch(candidate.name) === requestedNormalized,
+    (candidate) =>
+      candidate.exactSelection !== true &&
+      normalizeAgentTypeForMatch(candidate.name) === requestedNormalized,
   );
   if (normalizedMatches.length === 1) {
     return { kind: "matched", profile: normalizedMatches[0] };
@@ -786,15 +789,6 @@ function resolveAgentProfileByType(
   }
 
   return { availableAgentTypes, kind: "not_found" };
-}
-
-function normalizeAgentTypeForMatch(agentType: string): string | undefined {
-  const normalized = agentType
-    .trim()
-    .normalize("NFKC")
-    .toLowerCase()
-    .replace(/[\p{White_Space}\p{Pd}_]+/gu, "");
-  return normalized.length > 0 ? normalized : undefined;
 }
 
 function toSubagentExecutionRequest(request: SubagentLaunchRequest): SubagentRunRequest {

@@ -96,13 +96,13 @@ import {
 import {
   buildSessionSnapshot,
   buildWorkspaceRef,
-  formatProtocolModelSelection,
   mapSessionEventForProtocol,
   mapSessionInfo,
   resolveSessionContextUsage,
   shouldExposeSessionEventToProtocol,
 } from "./mapper.js";
 import { optionalModelSelectionFromString } from "./model-mapper.js";
+import { mapMessageWithParts } from "./message-mapper.js";
 import {
   ProtocolRequestError,
   assertExpectedRevision,
@@ -1335,7 +1335,8 @@ async function materializeCreatedSession<T>(
     await runSessionModelConfigMutation(record.app, async () => {
       if (initialModel) {
         const setInitialModelStartedAt = Date.now();
-        await record.app.setModel(formatProtocolModelSelection(initialModel));
+        // model 是完整会话选择；转成 provider/model 字符串会丢失已校验的 reasoning 档位。
+        await record.app.setModel(initialModel);
         setInitialModelDurationMs = Date.now() - setInitialModelStartedAt;
         record.stateRevision++;
       }
@@ -1966,7 +1967,8 @@ export async function readMessages(context: ZCodeProtocolAgentServerContext, raw
     : -1;
   const messages = afterMessageIndex >= 0 ? allMessages.slice(afterMessageIndex + 1) : allMessages;
   return {
-    messages: params.limit ? messages.slice(-params.limit) : messages,
+    // 与 snapshot 使用同一 wire mapper；Core 的 id/sessionID/time 不能直接进入严格协议。
+    messages: (params.limit ? messages.slice(-params.limit) : messages).map(mapMessageWithParts),
   };
 }
 
@@ -3288,6 +3290,7 @@ async function requestSessionRuntimePreferences(
   sessionId: SessionId,
   scope: ZCodeSessionRuntimePreferencesScope,
   trace?: ZCodeProtocolTrace,
+  signal?: AbortSignal,
 ): Promise<ZCodeSessionRuntimePreferencesResult> {
   const startedAt = Date.now();
   // ZCodeProtocolTrace.traceId 是协议层的 string；LogContext 需要 branded TraceId，
@@ -3307,6 +3310,7 @@ async function requestSessionRuntimePreferences(
       zcodeSessionRuntimePreferencesResultSchema,
       {
         timeoutMs: ZCODE_SESSION_RUNTIME_PREFERENCES_REQUEST_TIMEOUT_MS,
+        ...(signal ? { signal } : {}),
         ...(trace ? { trace } : {}),
       },
     );
@@ -3462,6 +3466,25 @@ async function createRecord(
   // 用可变持有者做惰性绑定：CronCreate 在 turn 中调用 create() 时 record 早已就绪。
   let ownSessionRecord: ZCodeProtocolSessionRecord | undefined;
   const app = await createWorkspaceZCodeApp(context, workspace, {
+    turnPresentationPort: {
+      read: async ({ signal, traceContext: turnTrace }) => {
+        const preferences = await requestSessionRuntimePreferences(
+          context,
+          sessionId,
+          "turn-presentation",
+          { traceId: turnTrace.traceId },
+          signal,
+        );
+        signal.throwIfAborted();
+        context.logger?.debug("Turn presentation decision captured", {
+          event: "zcode_protocol.turn_presentation.captured",
+          sessionId,
+          presentationStatus: preferences.presentationStatus,
+          presentationSurface: preferences.presentationSurface,
+        });
+        return preferences.presentationSurface;
+      },
+    },
     env: context.deps.env,
     eventStore,
     resume,

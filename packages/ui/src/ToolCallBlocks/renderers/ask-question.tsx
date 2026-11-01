@@ -2,6 +2,8 @@ import { CircleHelpIcon } from "lucide-react";
 import { useCallback } from "react";
 import {
   getAskUserQuestionAnswerText,
+  getAskUserQuestionMissingAnswerMessageId,
+  getAskUserQuestionRetainedSummary,
   normalizeAskUserQuestionInput,
   readAskUserQuestionAnswers,
   readAskUserQuestionInput,
@@ -21,38 +23,58 @@ export function AskQuestionToolCallBlock(context: ToolCallBlockRenderContext) {
   const input = readAskUserQuestionInput(toolCall);
   const data = normalizeAskUserQuestionInput(input);
   const answers = readAskUserQuestionAnswers(toolCall) ?? data.answers;
+  const retainedSummary = getAskUserQuestionRetainedSummary(toolCall.output, answers);
+  const retainedSummaryLabel = intl.formatMessage({ id: "chat.askQuestion.retainedSummary" });
   const wasAutomaticallyContinued =
     !isRunning &&
     toolCall.status !== "failed" &&
     answers !== undefined &&
     Object.keys(answers).length === 0;
   const noAnswerText = intl.formatMessage({
-    id: wasAutomaticallyContinued
-      ? "chat.askQuestion.autoContinued"
-      : "chat.askQuestion.noAnswerProvided",
+    id:
+      !isRunning && toolCall.status !== "failed"
+        ? getAskUserQuestionMissingAnswerMessageId(answers)
+        : "chat.askQuestion.noAnswerProvided",
   });
   const questionCount = data.questions.length;
   const isFailed = toolCall.status === "failed";
   const renderContent = useCallback(
     () =>
       !isRunning || isFailed ? (
-        <div className="ml-2 space-y-2 border-l border-border pl-3.5">
-          {data.questions.map((question) => (
-            <div key={question.id} className="space-y-1">
-              <p className="text-ui-base font-medium leading-5 text-foreground">
-                {question.question}
-              </p>
-              <p className="text-ui-base leading-5 text-foreground-subtle">
-                {getAskUserQuestionAnswerText(question, answers, noAnswerText)}
-              </p>
-            </div>
-          ))}
-          {data.questions.length === 0 ? (
-            <p className="text-ui-base leading-5 text-foreground-subtle">{noAnswerText}</p>
-          ) : null}
-        </div>
+        retainedSummary && !isFailed ? (
+          <div className="ml-2 space-y-2 border-l border-border pl-3.5">
+            <p className="text-ui-base font-medium">{retainedSummaryLabel}</p>
+            <p className="whitespace-pre-wrap break-words text-ui-base text-foreground-subtle">
+              {retainedSummary}
+            </p>
+          </div>
+        ) : (
+          <div className="ml-2 space-y-2 border-l border-border pl-3.5">
+            {data.questions.map((question) => (
+              <div key={question.id} className="space-y-1">
+                <p className="text-ui-base font-medium leading-5 text-foreground">
+                  {question.question}
+                </p>
+                <p className="text-ui-base leading-5 text-foreground-subtle">
+                  {getAskUserQuestionAnswerText(question, answers, noAnswerText)}
+                </p>
+              </div>
+            ))}
+            {data.questions.length === 0 ? (
+              <p className="text-ui-base leading-5 text-foreground-subtle">{noAnswerText}</p>
+            ) : null}
+          </div>
+        )
       ) : null,
-    [answers, data.questions, isFailed, isRunning, noAnswerText],
+    [
+      answers,
+      data.questions,
+      isFailed,
+      isRunning,
+      noAnswerText,
+      retainedSummary,
+      retainedSummaryLabel,
+    ],
   );
 
   return (

@@ -23,6 +23,12 @@ import {
 import { resolvedPlaceholderAttachment } from "./attachment-placeholder.js";
 import { inferImageMimeFromPath } from "./attachment-image.js";
 import {
+  authorizeLocalAttachment,
+  PromptAttachmentAuthorizationError,
+  waitForAttachment,
+  type PromptAttachmentAuthorizationContext,
+} from "./attachment-authorization.js";
+import {
   inferAttachmentMimeFromPath,
   isDataOrArtifactUrl,
   isTextLikePath,
@@ -39,6 +45,7 @@ type ResolveAttachmentOptions = {
   traceContext: TraceContext;
   turnId?: TurnId;
   workingDirectory: string;
+  authorization?: PromptAttachmentAuthorizationContext;
 };
 
 /**
@@ -88,8 +95,34 @@ export async function resolveTurnAttachments(
   options: ResolveAttachmentOptions,
 ): Promise<ResolvedTurnAttachment[]> {
   const resolved: ResolvedTurnAttachment[] = [];
+  const releases = new Map<number, () => Promise<void>>();
   for (const [index, attachment] of (attachments ?? []).entries()) {
-    resolved.push(await resolveTurnAttachment(attachment, index, options));
+    resolved.push(
+      await resolveTurnAttachment(attachment, index, options, (release) =>
+        releases.set(index, release),
+      ),
+    );
+  }
+  // 前一附件解析完成后，后一附件仍可能等待；批量出口才是本批正文进入 history 的准入点。
+  let withheld = false;
+  for (const release of releases.values()) {
+    try {
+      await release();
+    } catch (error) {
+      options.abortSignal?.throwIfAborted();
+      if (!(error instanceof PromptAttachmentAuthorizationError)) throw error;
+      withheld = true;
+    }
+  }
+  if (withheld) {
+    for (const index of releases.keys()) {
+      const attachment = attachments![index];
+      resolved[index] = resolvedPlaceholderAttachment(
+        attachment,
+        attachment.path!,
+        "attachment_read_failed",
+      );
+    }
   }
   return resolved;
 }
@@ -98,6 +131,7 @@ async function resolveTurnAttachment(
   attachment: TurnAttachment,
   index: number,
   options: ResolveAttachmentOptions,
+  registerRelease: (release: () => Promise<void>) => void,
 ): Promise<ResolvedTurnAttachment> {
   if (attachment.type === "url") {
     const uri = attachment.content ?? attachment.path ?? `attachment-${index + 1}`;
@@ -152,7 +186,8 @@ async function resolveTurnAttachment(
           : "deferred_clipboard_text",
     });
   }
-  if (attachment.content) {
+  // 空 inline 正文也有明确来源；显示文件名不能因此退化成同名本地文件读取。
+  if (attachment.content !== undefined) {
     if (attachment.type === "pdf" && !isDataOrArtifactUrl(attachment.content)) {
       // PDF 曾沿用普通 file 的 inline 文本分支，损坏或伪造的正文会被 UTF-8
       // 解码后送进 provider；PDF 必须只接受 data URL 或 artifact URI，并在请求前明确降级。
@@ -184,16 +219,32 @@ async function resolveTurnAttachment(
 
   const fileSystemPort = options.fileSystemPort;
   if (attachment.path && fileSystemPort) {
-    if (attachment.type === "image" || attachment.type === "video" || attachment.type === "pdf") {
-      return await resolveLocalMediaAttachment(attachment, index, {
-        ...options,
-        fileSystemPort,
-      });
+    try {
+      const release = await authorizeLocalAttachment(
+        attachment,
+        resolvePath(options.workingDirectory, attachment.path),
+        options.authorization,
+        options.abortSignal,
+      );
+      options.abortSignal?.throwIfAborted();
+      const resolved = await waitForAttachment(
+        attachment.type === "image" || attachment.type === "video" || attachment.type === "pdf"
+          ? resolveLocalMediaAttachment(attachment, index, {
+              ...options,
+              fileSystemPort,
+              beforeLocalContentRelease: release,
+            })
+          : resolveLocalFileAttachment(attachment, { ...options, fileSystemPort }),
+        options.abortSignal,
+      );
+      // 媒体已经在写 artifact 前复验；正文/preview 还须等整个附件批量出口再复验。
+      registerRelease(release);
+      return resolved;
+    } catch (error) {
+      options.abortSignal?.throwIfAborted();
+      if (!(error instanceof PromptAttachmentAuthorizationError)) throw error;
+      return resolvedPlaceholderAttachment(attachment, attachment.path, "attachment_read_failed");
     }
-    return await resolveLocalFileAttachment(attachment, {
-      ...options,
-      fileSystemPort,
-    });
   }
 
   const placeholder = attachment.path ?? `attachment-${index + 1}`;
@@ -261,6 +312,7 @@ async function resolveLocalFileAttachment(
       { path: absolutePath, trace: options.traceContext },
       { signal: options.abortSignal },
     );
+    options.abortSignal?.throwIfAborted();
     if (stat.kind !== "file") {
       return resolvedPlaceholderAttachment(attachment, attachment.path!, "attachment_not_file", {
         filename,
@@ -337,6 +389,7 @@ async function resolveLocalFileAttachment(
       url: attachment.path!,
     };
   } catch {
+    options.abortSignal?.throwIfAborted();
     return resolvedPlaceholderAttachment(attachment, attachment.path!, "attachment_read_failed", {
       filename,
       mime,

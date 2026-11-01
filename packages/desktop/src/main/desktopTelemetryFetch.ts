@@ -3,5 +3,5 @@ export interface DesktopTelemetryFetchSource {
 }
 
 export function createDesktopTelemetryFetch(source: DesktopTelemetryFetchSource): typeof fetch {
-  return (input, init) => source.fetch(input, init);
+  return (input, init) => source.fetch(input instanceof URL ? input.href : input, init);
 }

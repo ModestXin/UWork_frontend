@@ -27,6 +27,7 @@ import {
 } from "./public-egress-policy.js";
 import { readIncomingResponse } from "../network/incoming-response.js";
 import { readResponseBody, type ResponseLike } from "./response-body.js";
+export { withEnterpriseHttpAuthorization } from "./enterprise-http.js";
 
 const TRACE_HEADER = "x-zcode-trace-id";
 const DEFAULT_TIMEOUT_MS = 180_000;

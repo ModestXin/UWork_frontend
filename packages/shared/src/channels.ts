@@ -133,6 +133,7 @@ export const ServiceChannels = {
   UcasGateway: "ucas-gateway",
   /** 基础 IM：会话、消息收发与实时投递（服务端是 ucas-proxy 的 msgbus）。 */
   Im: "im",
+  EnterpriseConsole: "enterprise-console",
   /** 新 Provider Config 的设置读写 Facade */
   ProviderSettings: "provider-settings",
   /** 新 Provider Registry 的模型选择 Facade */
@@ -616,6 +617,7 @@ export const ZCODE_RPC_HOST_CAPABILITY_HEADER = "x-zcode-rpc-host-capability";
 export const HostMessageTypes = {
   /** main → Host：准备手机项目目录，只复用已在线物理 Source。 */
   PrepareProjectWorkspace: "prepare-project-workspace",
+  ClientPresentationRead: "client-presentation-read",
   DatabaseStartupControl: "database-startup-control",
   /** 初始化本地服务 */
   InitLocal: "init-local",
@@ -679,6 +681,8 @@ export const HostMessageTypes = {
 export const HostResponseTypes = {
   /** Host → main：已准入的目录与 scope，main 不解释项目业务。 */
   ProjectWorkspacePrepared: "project-workspace-prepared",
+  ClientPresentationResult: "client-presentation-result",
+  ClientPresentationInvalidated: "client-presentation-invalidated",
   DatabaseStartupState: "database-startup-state",
   /** window Host → main：按 requestId 上报远程连接过程日志 */
   RemoteWorkspaceConnectionLog: "remote-workspace-connection-log",

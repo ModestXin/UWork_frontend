@@ -143,5 +143,6 @@ export async function extractArchiveSafely(
     throw new Error(`Component archive contains a symbolic or hard link: ${archivePath}`);
   }
   validateArchiveEntries(listing);
-  await run("tar", ["-xzf", archivePath, "-C", destination], destination);
+  // 发行机 uid/gid 不是目标机安装身份；无 CAP_CHOWN 的 root 也不能恢复异机属主，保留当前安装者归属。
+  await run("tar", ["--no-same-owner", "-xzf", archivePath, "-C", destination], destination);
 }

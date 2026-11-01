@@ -17,6 +17,7 @@ import type {
   ToolArtifactStorePort,
   WorkflowEscalatePort,
   WorkflowSubmitPort,
+  WorkflowExecutionAdmission,
 } from "@zcode/contracts";
 import type { AgentRuntime } from "@zcode/core";
 import type {
@@ -91,6 +92,8 @@ export type ActorRuntimeFactory = (input: {
 
 /** 构造 AgentRuntime-backed driver 所需的依赖（journal 与 emit 由调用方/harness 提供并持有）。 */
 export interface AgentRuntimeWorkflowDriverDeps {
+  admission?: WorkflowExecutionAdmission;
+  executionSignal?: AbortSignal;
   journal: JournalStorePort;
   emit: (event: RunEvent) => void;
   /** world-read（files.glob / files.read / files.grep）落到的文件系统端口。 */

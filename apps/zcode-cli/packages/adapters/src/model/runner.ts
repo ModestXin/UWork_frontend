@@ -59,9 +59,11 @@ export type {
 export { normalizeUsage, toModelStreamEvent } from "./runner-normalization.js";
 
 export interface AiSdkModelAdapterOptions {
+  enterpriseSessionFetch?: AiSdkModelExecutionConfig["enterpriseSessionFetch"];
   defaultHeaders?: AiSdkModelExecutionConfig["defaultHeaders"];
   requestSecurityState?: ModelRequestSecurityState;
   endpointRoutingPort?: import("@zcode/contracts").ProviderEndpointRoutingPort;
+  beforeDispatch?: AiSdkModelExecutionConfig["beforeDispatch"];
   network?: AiSdkNetworkConfig;
   runtime?: AiSdkModelRuntime;
   env?: EnvRecord;
@@ -97,10 +99,12 @@ export class AiSdkModelAdapter {
   constructor(options: AiSdkModelAdapterOptions) {
     this.execution = new AiSdkModelExecution(
       {
+        enterpriseSessionFetch: options.enterpriseSessionFetch,
         defaultHeaders: options.defaultHeaders,
         ...(options.endpointRoutingPort
           ? { endpointRoutingPort: options.endpointRoutingPort }
           : {}),
+        beforeDispatch: options.beforeDispatch,
         ...(options.network ? { network: options.network } : {}),
         ...(options.env ? { env: options.env } : {}),
       },

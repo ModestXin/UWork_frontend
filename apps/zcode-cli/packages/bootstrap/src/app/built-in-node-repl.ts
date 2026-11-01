@@ -45,6 +45,8 @@ export function resolveBuiltInNodeReplMcpServers(input: {
   return {
     [BUILT_IN_NODE_REPL_SERVER_NAME]: {
       ...nodeRepl,
+      // 仅此真实内置注册点写入私有来源；文件/Renderer MCP schema不接受source。
+      source: { kind: "builtin" },
       isolation: "workspace",
       protocolVersion: "2026-07-28",
     },

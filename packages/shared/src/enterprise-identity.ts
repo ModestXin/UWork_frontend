@@ -12,6 +12,8 @@ export const enterpriseIdentitySessionSchema = z.object({
   profile: enterpriseIdentityProfileSchema,
   token: z.string().min(1).max(16384),
   expiresAt: z.number().int().positive(),
+  /** Private self-owned session issuer binding; omitted for the existing UCAS protocol. */
+  issuerOrigin: z.url().optional(),
 });
 export type EnterpriseIdentitySession = z.infer<typeof enterpriseIdentitySessionSchema>;
 

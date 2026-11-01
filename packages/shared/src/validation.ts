@@ -2,6 +2,11 @@ import { mobilePluginDiscoveryTelemetrySchema } from "./telemetry.js";
 import { databaseStartupControlSchema, databaseStartupStateSchema } from "./database-startup.js";
 import { mcpAppInstanceSchema } from "./mcp-apps/instance.js";
 import {
+  hostClientPresentationReadMessageSchema,
+  hostClientPresentationResultSchema,
+  hostClientPresentationInvalidatedSchema,
+} from "./desktop-client-presentation.js";
+import {
   automationSessionCreateTelemetrySchema,
   sessionCreateTelemetrySchema,
 } from "./sessionCreateTelemetry.js";
@@ -965,6 +970,7 @@ export type HostResourceUsageSnapshotRequestMessage = z.infer<
 export const hostIncomingMessageSchema = z.discriminatedUnion("type", [
   hostPrepareProjectWorkspaceMessageSchema,
   z.object({ type: z.literal("network-capture"), control: networkCaptureControlSchema }).strict(),
+  hostClientPresentationReadMessageSchema,
   z
     .object({ type: z.literal("database-startup-control"), control: databaseStartupControlSchema })
     .strict(),
@@ -1566,6 +1572,8 @@ export type HostResourceUsageSnapshotResultResponse = z.infer<
 export const hostResponseMessageSchema = z.discriminatedUnion("type", [
   hostProjectWorkspacePreparedResponseSchema,
   z.object({ type: z.literal("network-capture-batch"), batch: networkCaptureBatchSchema }).strict(),
+  hostClientPresentationResultSchema,
+  hostClientPresentationInvalidatedSchema,
   z
     .object({ type: z.literal("database-startup-state"), state: databaseStartupStateSchema })
     .strict(),

@@ -8,6 +8,7 @@ import {
   type HostAgentProcessReadyResponse,
   type HostAgentProcessSpawnedResponse,
   type HostCuaOperationStateResponse,
+  type HostClientPresentationResponse,
   type HostMcpTelemetryResponse,
   type HostSessionCreateTelemetryResponse,
   type HostPluginTelemetryResponse,
@@ -175,6 +176,12 @@ export function spawnHostProcess(
     broadcastHub: BroadcastHub;
     taskRealtimeBus?: TaskRealtimeBus;
     windowHostProcessMap: Map<number, ElectronUtilityProcess>;
+    onClientPresentationMessage?: (
+      senderId: number,
+      child: ElectronUtilityProcess,
+      message: HostClientPresentationResponse,
+    ) => void;
+    onClientPresentationSourceExited?: (child: ElectronUtilityProcess) => void;
     hostRunningTaskCountMap: Map<ElectronUtilityProcess, number>;
     onWorkspaceRunningTaskCountChanged?: (
       child: ElectronUtilityProcess,
@@ -302,6 +309,14 @@ export function spawnHostProcess(
   child.on("message", (message: unknown) => {
     const result = hostResponseMessageSchema.safeParse(message);
     if (!result.success) {
+      return;
+    }
+
+    if (
+      result.data.type === HostResponseTypes.ClientPresentationResult ||
+      result.data.type === HostResponseTypes.ClientPresentationInvalidated
+    ) {
+      dependencies.onClientPresentationMessage?.(win.webContents.id, child, result.data);
       return;
     }
 
@@ -649,6 +664,7 @@ export function spawnHostProcess(
 
   child.on("exit", (code) => {
     exitedHostProcesses.add(child);
+    dependencies.onClientPresentationSourceExited?.(child);
     // Host exit 是 fail-hidden 权威边界；不能依赖即将退出的 Host 再补发 inactive。
     dependencies.onCuaOperationStateSourceExited?.(child);
     hostLogRelay.flushRawLogs();

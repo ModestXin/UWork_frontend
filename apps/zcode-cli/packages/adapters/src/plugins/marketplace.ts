@@ -1,7 +1,16 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { PluginDiagnostic, PluginManifest, PluginStoreListing } from "@zcode/contracts";
@@ -25,7 +34,10 @@ import {
 import { enumeratePluginComponents, type PluginComponentGroup } from "./plugin-components.js";
 import { applyNetworkEgressEnv } from "../network/subprocess-env.js";
 import { createNodeWebFetchHttpClientAdapter } from "../http/index.js";
-import { writeCdnOfficialMarketplacePartitionSync } from "./official-marketplace.js";
+import {
+  loadBundledOfficialPluginRootsSync,
+  writeCdnOfficialMarketplacePartitionSync,
+} from "./official-marketplace.js";
 import { createSkillhubHttpClient, normalizeSkillhubBaseUrl } from "./skillhub-common.js";
 import {
   buildSkillhubMarketplaceManifestRaw,
@@ -946,15 +958,124 @@ export async function uninstallMarketplacePlugin(input: {
   const [removed] = state.plugins.splice(index, 1);
   await saveInstalledPlugins(input.storageRoot, state);
   if (removed && input.removeCache === true) {
-    await rm(removed.installPath, { force: true, recursive: true });
-    // 彻底卸载：data/<plugin-id> 是持久化的 per-plugin 目录（含 materialize 的 generated-commands）。
-    // 按「卸载最后一份安装时一并删除」语义，保证重装是干净的。
-
-    if (input.keepData !== true) {
-      await rm(getPluginDataDir(input.storageRoot, removed.id), { force: true, recursive: true });
-    }
+    // 升级保留旧版本；只删当前 installPath 会让默认卸载残留 V1 缓存。
+    // 按现有 cache owner 清理，仍有安装或内置回退引用时不能扩大删除范围。
+    await removeUninstalledPluginFiles({ ...input, removed, remaining: state.plugins });
   }
   return removed ?? null;
+}
+
+function atOrInside(parent: string, path: string): boolean {
+  const child = relative(parent, resolve(path));
+  return child === "" || (!isAbsolute(child) && child !== ".." && !child.startsWith(`..${sep}`));
+}
+
+async function ownedDirectory(root: string, parts: string[]): Promise<string | null> {
+  let path = root;
+  for (const part of parts) {
+    path = join(path, part);
+    try {
+      const info = await lstat(path);
+      if (info.isSymbolicLink() || !info.isDirectory()) {
+        throw new Error("Plugin cleanup path is not an owned directory");
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
+  }
+  return path;
+}
+
+async function bundledCacheOwner(
+  storageRoot: string,
+  owner: string,
+  aliases: string[],
+): Promise<boolean> {
+  const bundled = loadBundledOfficialPluginRootsSync(storageRoot);
+  if (bundled?.some((root) => aliases.some((alias) => atOrInside(alias, root)))) return true;
+  // 老内置缓存可能还没有 partition；seed marker 仍表示不可变产品资产。
+  for (const version of await readdir(owner, { withFileTypes: true })) {
+    if (!version.isDirectory() || version.isSymbolicLink()) continue;
+    try {
+      const markerPath = join(owner, version.name, ".zcode-plugin-seed.json");
+      const info = await lstat(markerPath);
+      if (!info.isFile() || info.isSymbolicLink() || info.size > 4096) continue;
+      let marker: unknown;
+      try {
+        marker = JSON.parse(await readFile(markerPath, "utf8"));
+      } catch (error) {
+        if (error instanceof SyntaxError) continue;
+        throw error;
+      }
+      // 普通包中同名空文件/目录不能伪装为内置归属；只接受现有 seed 格式及当前 owner 身份。
+      if (
+        isRecord(marker) &&
+        marker.version === 1 &&
+        marker.marketplace === ZCODE_OFFICIAL_PLUGIN_MARKETPLACE &&
+        marker.plugin === basename(owner) &&
+        typeof marker.pluginVersion === "string" &&
+        sanitizePluginId(marker.pluginVersion) === version.name &&
+        (marker.source === "filesystem" || marker.source === "sea") &&
+        typeof marker.hash === "string" &&
+        /^[a-f0-9]{64}$/u.test(marker.hash)
+      )
+        return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  return false;
+}
+
+async function removeUninstalledPluginFiles(input: {
+  storageRoot: string;
+  removed: InstalledPluginRecord;
+  remaining: InstalledPluginRecord[];
+  keepData?: boolean;
+}): Promise<void> {
+  const { removed, remaining } = input;
+  const logicalOwner = resolve(
+    getPluginCacheOwnerRoot(input.storageRoot, removed.marketplace, removed.name),
+  );
+  if (removed.id !== `${removed.name}@${removed.marketplace}`) {
+    throw new Error("Invalid plugin cache owner identity");
+  }
+  const root = await realpath(input.storageRoot);
+  const owner = await ownedDirectory(root, ["cache", removed.marketplace, removed.name]);
+  const aliases = [logicalOwner, join(root, "cache", removed.marketplace, removed.name)];
+  let shared = remaining.some(
+    (record) =>
+      (record.marketplace === removed.marketplace && record.name === removed.name) ||
+      aliases.some((alias) => atOrInside(alias, record.installPath)),
+  );
+  // 兼容安装可能通过另一条目录别名引用本 owner，词法前缀相异不代表缓存无人使用。
+  if (owner && !shared) {
+    for (const record of remaining) {
+      try {
+        if (atOrInside(owner, await realpath(record.installPath))) {
+          shared = true;
+          break;
+        }
+      } catch (error) {
+        if (!["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? ""))
+          throw error;
+      }
+    }
+  }
+  const protectedBuiltin =
+    owner !== null &&
+    removed.marketplace === ZCODE_OFFICIAL_PLUGIN_MARKETPLACE &&
+    (await bundledCacheOwner(input.storageRoot, owner, aliases));
+  const sharedData = remaining.some(
+    (record) => sanitizePluginId(record.id) === sanitizePluginId(removed.id),
+  );
+  const data =
+    input.keepData !== true && !sharedData
+      ? await ownedDirectory(root, ["data", sanitizePluginId(removed.id)])
+      : null;
+  if (owner && !shared && !protectedBuiltin) await rm(owner, { force: true, recursive: true });
+  if (data) await rm(data, { force: true, recursive: true });
 }
 
 export async function validateMarketplacePlugin(input: {
@@ -2965,13 +3086,18 @@ function getPluginCacheDir(
   name: string,
   version: string,
 ): string {
-  return join(
-    storageRoot,
-    "cache",
-    sanitizePluginId(marketplace),
-    sanitizePluginId(name),
-    sanitizePluginId(version),
-  );
+  const segment = sanitizePluginId(version);
+  // 点段/空段会让安装覆盖整个插件或市场目录，必须在原子激活与记录提交前拒绝。
+  if (!segment || segment === "." || segment === "..")
+    throw new Error("Invalid plugin cache version segment");
+  return join(getPluginCacheOwnerRoot(storageRoot, marketplace, name), segment);
+}
+
+function getPluginCacheOwnerRoot(storageRoot: string, marketplace: string, name: string): string {
+  if (!MARKETPLACE_NAME_PATTERN.test(marketplace) || !PLUGIN_NAME_PATTERN.test(name)) {
+    throw new Error("Invalid plugin cache owner component");
+  }
+  return join(storageRoot, "cache", marketplace, name);
 }
 
 export function getPluginDataDir(storageRoot: string, pluginId: string): string {

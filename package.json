@@ -51,6 +51,13 @@
     "test:sea-runtime-tools:e2e": "node scripts/test-sea-runtime-tools-e2e.mjs",
     "clean": "node scripts/clean.mjs",
     "typecheck": "tsc -b packages/shared/tsconfig.testing.json packages/rpc packages/provider packages/provider-node packages/shared packages/services packages/client packages/server packages/zcode-server-cli packages/ui packages/web packages/relay apps/dev-docs packages/e2e-report packages/desktop/tsconfig.main.json packages/desktop/tsconfig.host.json packages/desktop/tsconfig.e2e.json && tsc -p packages/desktop/tsconfig.remote-main.json --noEmit && tsc -p packages/zcode-cua --noEmit",
+    "test:enterprise-policy": "tsc -p apps/zcode-cli/tsconfig.test.json && tsx --tsconfig apps/zcode-cli/tsconfig.test.json --test apps/zcode-cli/packages/core/test/*.test.ts && tsx --test packages/services/test/enterprise*.test.ts packages/services/test/uworkBackendSession.test.ts packages/services/test/uworkIdentityIssuer.test.ts packages/services/test/ucasGateway*.test.ts packages/services/test/uworkToolAuthorization.test.ts",
+    "test:enterprise-workflow": "tsc -p apps/zcode-cli/tsconfig.workflow-tests.json && tsx --tsconfig apps/zcode-cli/tsconfig.workflow-tests.json --test apps/zcode-cli/packages/core/test/enterprise-workflow-execution.test.ts apps/zcode-cli/packages/bootstrap/test/enterprise-workflow-*.test.ts apps/zcode-cli/packages/dynamic-workflow-runtime/test/enterprise-workflow-harness.test.ts",
+    "test:enterprise-provider-settings": "tsc -b packages/shared packages/rpc packages/provider packages/provider-node && tsc -p packages/services/tsconfig.enterprise-provider-settings-test.json && tsx --test packages/services/test/uworkProviderSettingsPolicy.test.ts",
+    "test:enterprise-gateway-catalog": "tsc -b packages/shared packages/rpc packages/provider packages/provider-node && tsc -p packages/services/tsconfig.enterprise-gateway-catalog-test.json && tsx --test packages/services/test/enterpriseGatewayLogoutCatalog.test.ts && tsx --tsconfig packages/ui/tsconfig.json --test packages/ui/test/modelCatalogInvalidation.test.mjs",
+    "test:enterprise-sharing": "tsc -b packages/shared packages/rpc && tsc -p packages/services/tsconfig.enterprise-sharing-test.json && tsc -p packages/ui/tsconfig.enterprise-sharing-test.json && tsx --test packages/services/test/uworkConversationSharing.test.ts packages/services/test/uworkManagedConversationSharing.test.ts packages/services/test/uworkShareManagedAdmission.test.ts packages/services/test/uworkShareRequestBounds.test.ts packages/services/test/uworkShareLocalFiles.test.ts && tsx --tsconfig packages/ui/tsconfig.enterprise-sharing-test.json --test packages/ui/test/conversationShareAccess.test.ts packages/ui/test/conversationSharePermission.test.tsx",
+    "test:enterprise-console": "tsc -b packages/shared packages/rpc && tsc -p packages/services/tsconfig.enterprise-console-test.json && tsx --test packages/services/test/enterpriseConsole.test.ts packages/services/test/enterpriseClientPresentation.test.ts packages/ui/test/enterpriseMenuNavigation.test.ts",
+    "test:enterprise-assets": "tsc -b packages/shared packages/rpc && tsc -p packages/services/tsconfig.enterprise-assets-test.json && tsx --test packages/services/test/enterpriseAssetStore.test.ts packages/services/test/enterpriseAssetSelection.test.ts packages/services/test/enterpriseAssetsHost.test.ts packages/services/test/enterpriseAssetsBridge.test.ts packages/services/test/enterpriseExpertAssets.test.ts packages/services/test/enterpriseConnectorAssets.test.ts",
     "bundle:desktop": "pnpm --filter @zcode/desktop run bundle --",
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",
@@ -75,7 +82,8 @@
     "test:architecture": "node --test scripts/test/architecture-governance.test.mjs scripts/test/architecture-governance-review.test.mjs scripts/test/architecture-upstream-admission.test.mjs scripts/test/source-size-policy.test.mjs",
     "architecture:adopt": "node scripts/architecture/architecture-check.mjs adopt",
     "db:schema:check": "node --test scripts/test/sqlite-schema-contract.test.mjs && pnpm --dir apps/zcode-cli exec tsx ../../scripts/check-sqlite-schema.ts",
-    "db:schema:update": "pnpm --dir apps/zcode-cli exec tsx ../../scripts/check-sqlite-schema.ts --update"
+    "db:schema:update": "pnpm --dir apps/zcode-cli exec tsx ../../scripts/check-sqlite-schema.ts --update",
+    "test:gateway-view-delivery": "tsc -b packages/shared packages/rpc packages/provider packages/provider-node packages/services && pnpm --filter @zcode/ui run test:gateway-view-delivery"
   },
   "dependencies": {
     "border-beam": "^1.0.1",

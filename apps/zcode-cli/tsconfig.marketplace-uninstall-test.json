@@ -1,0 +1,14 @@
+{
+  "extends": "./packages/adapters/tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "rootDir": ".",
+    "target": "ES2024"
+  },
+  "include": [
+    "packages/adapters/test/marketplaceUninstall.test.ts",
+    "packages/adapters/test/marketplaceOwnershipReferences.test.ts"
+  ]
+}

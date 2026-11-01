@@ -16,6 +16,10 @@ import {
 import type { ToolEntry, ToolHandler } from "../types.js";
 
 const MAX_ASK_USER_QUESTION_MODEL_BYTES = 100_000;
+const ASK_USER_QUESTION_EMPTY_GUIDANCE =
+  "The user did not provide answers to these questions. Continue using your best judgment; do not treat this as a rejection or invent a user preference.";
+const ASK_USER_QUESTION_ANSWERED_GUIDANCE =
+  "User has answered your questions. You can now continue with the user's answers in mind.";
 
 const ASK_USER_QUESTION_DESCRIPTION =
   [
@@ -130,29 +134,20 @@ export const askUserQuestionToolEntry: ToolEntry = {
 
 function formatAskUserQuestionModelContent(output: unknown): string {
   const result = output as AskUserQuestionOutput;
-  if (Object.keys(result.answers).length === 0) {
-    return "The user did not provide answers to these questions. Continue using your best judgment; do not treat this as a rejection or invent a user preference.";
-  }
-  const answersText = Object.entries(result.answers)
-    .map(([questionText, answer]) => {
-      const annotation = result.annotations?.[questionText];
-      const parts = [`"${questionText}"="${answer}"`];
-      if (annotation?.preview) {
-        parts.push(`selected preview:\n${annotation.preview}`);
-      }
-      if (annotation?.notes) {
-        parts.push(`user notes: ${annotation.notes}`);
-      }
-      return parts.join(" ");
-    })
-    .join(", ");
-
   const unansweredCount = result.questions.filter(
     (question) => !(question.question in result.answers),
   ).length;
-  if (unansweredCount > 0) {
-    return `The user answered some questions and skipped ${unansweredCount}. Provided answers: ${answersText}. Continue with the provided answers and use your best judgment for the unanswered questions; do not invent user preferences.`;
-  }
-
-  return `User has answered your questions: ${answersText}. You can now continue with the user's answers in mind.`;
+  const guidance =
+    Object.keys(result.answers).length === 0
+      ? ASK_USER_QUESTION_EMPTY_GUIDANCE
+      : unansweredCount > 0
+        ? `The user answered some questions and skipped ${unansweredCount}. Continue with the provided answers and use your best judgment for the unanswered questions; do not invent user preferences.`
+        : ASK_USER_QUESTION_ANSWERED_GUIDANCE;
+  // 自然语言摘要也被写入ToolPart，旧格式丢失可解析答案，历史卡误显示未回答。
+  // 模型/存储/UI共用原字符串中的JSON事实；不重复已在工具输入里的questions/options。
+  return JSON.stringify({
+    answers: result.answers,
+    ...(result.annotations ? { annotations: result.annotations } : {}),
+    guidance,
+  });
 }

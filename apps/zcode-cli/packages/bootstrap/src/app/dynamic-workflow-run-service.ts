@@ -197,6 +197,10 @@ export interface DynamicWorkflowActorRuntimeInput {
 }
 
 export interface DynamicWorkflowRunServiceDeps {
+  /** Runtime 提供唯一执行范围；仅操作闭包持有，不持久化准入结果。 */
+  createExecutionAdmission?: (
+    signal?: AbortSignal,
+  ) => Promise<import("@zcode/contracts").WorkflowExecutionAdmission>;
   /** durable journal（dwf_* 表）。缺失即不构造本服务，见文件头不变式 3。 */
   journal: JournalStorePort;
   /**
@@ -384,6 +388,7 @@ export function createDynamicWorkflowRunService(
     trackSettlement,
     close,
     assertOpen,
+    signal: lifetimeSignal,
     noteForeignTerminalRow,
   } = createRunServiceLifecycle({
     journal: deps.journal,
@@ -403,6 +408,8 @@ export function createDynamicWorkflowRunService(
     escalations,
     caps,
     trackSettlement,
+    assertOpen,
+    lifetimeSignal,
   };
 
   return {
@@ -414,14 +421,18 @@ export function createDynamicWorkflowRunService(
     // 委托之间没有 await，所以不变式 6 的「登记与 launch 同一同步片」不受影响。
     async submit(
       request: DynamicWorkflowRunSubmitRequest,
+      options?: import("@zcode/contracts").DynamicWorkflowRunSubmitOptions,
     ): Promise<DynamicWorkflowRunSubmitResult> {
       assertOpen();
-      return submitDynamicWorkflowRun(entryContext, request);
+      return submitDynamicWorkflowRun(entryContext, request, options);
     },
 
-    async amend(request: DynamicWorkflowRunAmendRequest): Promise<DynamicWorkflowRunAmendResult> {
+    async amend(
+      request: DynamicWorkflowRunAmendRequest,
+      options?: import("@zcode/contracts").DynamicWorkflowRunSubmitOptions,
+    ): Promise<DynamicWorkflowRunAmendResult> {
       assertOpen();
-      return amendDynamicWorkflowRun(entryContext, request);
+      return amendDynamicWorkflowRun(entryContext, request, options);
     },
 
     /**
@@ -444,9 +455,12 @@ export function createDynamicWorkflowRunService(
       return retuneRunConcurrency({ runs, journal: deps.journal, defaultConcurrency }, request);
     },
 
-    async resume(runId: string): Promise<DynamicWorkflowRunResumeResult> {
+    async resume(
+      runId: string,
+      options?: import("@zcode/contracts").DynamicWorkflowRunSubmitOptions,
+    ): Promise<DynamicWorkflowRunResumeResult> {
       assertOpen();
-      return resumeDynamicWorkflowRun(entryContext, runId);
+      return resumeDynamicWorkflowRun(entryContext, runId, options);
     },
 
     async listRunsForSession(limit?: number): Promise<DynamicWorkflowRunSessionSummary[]> {

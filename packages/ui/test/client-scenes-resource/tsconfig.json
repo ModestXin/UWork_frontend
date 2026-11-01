@@ -1,0 +1,23 @@
+{
+  "extends": "../../../../tsconfig.base.json",
+  "compilerOptions": {
+    "strict": true,
+    "noEmit": true,
+    "composite": false,
+    "incremental": false,
+    "declaration": false,
+    "declarationMap": false,
+    "disableSourceOfProjectReferenceRedirect": true,
+    "paths": { "@/*": ["../../src/*"] },
+    "lib": ["es2025", "dom", "dom.iterable"],
+    "jsx": "react-jsx",
+    "types": ["node"]
+  },
+  "include": ["main.tsx", "../../src/css.d.ts"],
+  "references": [
+    { "path": "../../../shared" },
+    { "path": "../../../rpc" },
+    { "path": "../../../services" },
+    { "path": "../.." }
+  ]
+}

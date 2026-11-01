@@ -527,3 +527,14 @@ export const taskRealtimeDeliveredEventSchema = z
       addRunIdTraceIdIssue(ctx, event);
     }
   });
+
+// Main 是 wire 中继，不能把仅校验 envelope 的 passthrough 消息当作完整业务事件。
+// 业务 ZCodeStreamEvent 仍由原消费者解读；中继的静态类型严格来自实际运行时 schema。
+export type TaskRealtimeWireEvent = z.infer<typeof taskRealtimeEventSchema>;
+export type TaskRealtimeWireDeliveredEvent = z.infer<typeof taskRealtimeDeliveredEventSchema>;
+export type TaskStreamMirrorWireOp = z.infer<typeof taskStreamMirrorOpSchema>;
+export type TaskStreamMirrorWirePublishOp = z.infer<typeof taskStreamMirrorPublishOpSchema>;
+export type TaskStreamMirrorWireBatchEvent = Extract<
+  TaskRealtimeWireEvent,
+  { type: "task_stream_mirror_batch" }
+>;

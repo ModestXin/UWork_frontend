@@ -24,26 +24,26 @@ function wrapBrowserWebSocket(ws: WebSocket): ISocket {
   const onData = new Emitter<VSBuffer>();
   const onClose = new Emitter<void>();
   const onEnd = new Emitter<void>();
+  let disposed = false;
+  const handleMessage = (event: MessageEvent) => {
+    onData.fire(VSBuffer.wrap(new Uint8Array(event.data as ArrayBuffer)));
+  };
+  const handleEnd = () => {
+    onClose.fire();
+    onEnd.fire();
+  };
 
   ws.binaryType = "arraybuffer";
-  ws.addEventListener("message", (e) => {
-    onData.fire(VSBuffer.wrap(new Uint8Array(e.data as ArrayBuffer)));
-  });
-  ws.addEventListener("close", () => {
-    onClose.fire();
-    onEnd.fire();
-  });
-  ws.addEventListener("error", () => {
-    onClose.fire();
-    onEnd.fire();
-  });
+  ws.addEventListener("message", handleMessage);
+  ws.addEventListener("close", handleEnd);
+  ws.addEventListener("error", handleEnd);
 
   return {
     onData: onData.event,
     onClose: onClose.event,
     onEnd: onEnd.event,
     write(buffer: VSBuffer) {
-      if (ws.readyState === WebSocket.OPEN) {
+      if (!disposed && ws.readyState === WebSocket.OPEN) {
         ws.send(buffer.buffer as Uint8Array<ArrayBuffer>);
       }
     },
@@ -54,7 +54,15 @@ function wrapBrowserWebSocket(ws: WebSocket): ISocket {
       return Promise.resolve();
     },
     dispose() {
-      ws.close();
+      if (disposed) return;
+      disposed = true;
+      ws.removeEventListener("message", handleMessage);
+      ws.removeEventListener("close", handleEnd);
+      ws.removeEventListener("error", handleEnd);
+      onData.dispose();
+      onClose.dispose();
+      onEnd.dispose();
+      if (ws.readyState < WebSocket.CLOSING) ws.close();
     },
   };
 }
@@ -66,36 +74,80 @@ export function connectViaWebSocket(
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(wsUrl);
     let settled = false;
+    let disposed = false;
+    let socket: ISocket | undefined;
+    let protocol: SocketProtocol | undefined;
+    let client: ChannelClient | undefined;
 
-    ws.addEventListener("error", () => {
+    const disposeConnection = () => {
+      if (disposed) return;
+      disposed = true;
+      // SocketProtocol 只负责分帧；连接 owner 必须结束 RPC，避免关闭后永远等待响应。
+      try {
+        client?.dispose();
+      } finally {
+        try {
+          protocol?.dispose();
+        } finally {
+          if (socket) socket.dispose();
+          else if (ws.readyState < WebSocket.CLOSING) ws.close();
+        }
+      }
+    };
+    const handleError = () => {
+      disposeConnection();
+      ws.removeEventListener("open", handleOpen);
+      ws.removeEventListener("error", handleError);
+      // error 可先终结资源；保留 close listener，随后仅通知真实的 CloseEvent。
       if (!settled) {
+        settled = true;
         reject(new Error(`WebSocket connection failed: ${wsUrl}`));
       }
-    });
-    ws.addEventListener("close", (event) => {
-      options?.onClose?.({
-        code: event.code,
-        reason: event.reason,
-        wasClean: event.wasClean,
-      });
-
-      if (!settled) {
-        reject(
-          new Error(
-            event.reason
-              ? `WebSocket closed before ready: ${event.reason}`
-              : `WebSocket closed before ready (${event.code})`,
-          ),
-        );
+    };
+    const handleClose = (event: CloseEvent) => {
+      disposeConnection();
+      ws.removeEventListener("open", handleOpen);
+      ws.removeEventListener("error", handleError);
+      ws.removeEventListener("close", handleClose);
+      try {
+        options?.onClose?.({
+          code: event.code,
+          reason: event.reason,
+          wasClean: event.wasClean,
+        });
+      } finally {
+        if (!settled) {
+          settled = true;
+          reject(
+            new Error(
+              event.reason
+                ? `WebSocket closed before ready: ${event.reason}`
+                : `WebSocket closed before ready (${event.code})`,
+            ),
+          );
+        }
       }
-    });
-
-    ws.addEventListener("open", () => {
+    };
+    const handleOpen = () => {
+      ws.removeEventListener("open", handleOpen);
+      if (disposed) return;
       settled = true;
+      socket = wrapBrowserWebSocket(ws);
+      protocol = new SocketProtocol(socket);
+      client = new ChannelClient(protocol);
       options?.onOpenSocket?.(ws);
-      const socket = wrapBrowserWebSocket(ws);
-      resolve(connectViaProtocol(new SocketProtocol(socket)));
-    });
+      // open 观察回调也可能同步关闭/报错，不能再交付已终结连接的代理。
+      if (disposed || ws.readyState !== WebSocket.OPEN) {
+        disposeConnection();
+        reject(new Error("WebSocket closed before ready"));
+        return;
+      }
+      resolve(new RemoteServiceAccess(client));
+    };
+
+    ws.addEventListener("error", handleError);
+    ws.addEventListener("close", handleClose);
+    ws.addEventListener("open", handleOpen);
   });
 }
 

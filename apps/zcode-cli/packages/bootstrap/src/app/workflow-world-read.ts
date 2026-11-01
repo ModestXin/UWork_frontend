@@ -20,6 +20,7 @@ import {
   sep,
 } from "node:path";
 import type { ExecutionPort, FileSystemPort } from "@zcode/contracts";
+import { withWorkflowIo, type WorkflowIoAdmission } from "./workflow-io-admission.js";
 import { WORLD_READ_CAPS, WorkflowError, type WorldReadOp } from "@zcode/dynamic-workflow";
 import {
   GIT_SHOW_PREFIX_ARGV,
@@ -36,7 +37,7 @@ import {
 } from "./workflow-git-world-read.js";
 
 /** 世界读取需要的端口与基准目录（driver deps 的一个子集）。 */
-export interface WorldReadDeps {
+export interface WorldReadDeps extends WorkflowIoAdmission {
   /** files.glob / files.read / files.grep 落到的文件系统端口。 */
   readonly fileSystemPort: FileSystemPort;
   /** git.* 落到的子进程执行端口（cwd = 工作区根）。 */
@@ -111,11 +112,13 @@ export async function executeWorldRead(
  */
 async function worldGlob(deps: WorldReadDeps, pattern: string): Promise<string[]> {
   const cap = WORLD_READ_CAPS.globMaxFiles;
-  const result = await deps.fileSystemPort.searchFiles({
-    path: deps.cwd,
-    pattern,
-    maxResults: cap + 1,
-  });
+  const result = await withWorkflowIo(deps, () =>
+    deps.fileSystemPort.searchFiles({
+      path: deps.cwd,
+      pattern,
+      maxResults: cap + 1,
+    }),
+  );
   if (result.files.length > cap || result.truncated) {
     throw capExceeded(`files.glob: over ${cap} files match (the cap). Narrow the pattern.`);
   }
@@ -133,7 +136,7 @@ async function worldGlob(deps: WorldReadDeps, pattern: string): Promise<string[]
  */
 async function worldRead(deps: WorldReadDeps, arg: string): Promise<string> {
   const path = assertWithinWorkspace("read", deps.cwd, arg);
-  const result = await deps.fileSystemPort.readTextFile({ path });
+  const result = await withWorkflowIo(deps, () => deps.fileSystemPort.readTextFile({ path }));
   return result.content;
 }
 
@@ -152,14 +155,16 @@ async function worldGrep(
   glob: string | undefined,
 ): Promise<GrepMatch[]> {
   const cap = WORLD_READ_CAPS.grepMaxMatches;
-  const result = await deps.fileSystemPort.searchText({
-    path: deps.cwd,
-    pattern,
-    ...(glob === undefined ? {} : { glob }),
-    outputMode: "content",
-    showLineNumbers: true,
-    headLimit: cap + 1,
-  });
+  const result = await withWorkflowIo(deps, () =>
+    deps.fileSystemPort.searchText({
+      path: deps.cwd,
+      pattern,
+      ...(glob === undefined ? {} : { glob }),
+      outputMode: "content",
+      showLineNumbers: true,
+      headLimit: cap + 1,
+    }),
+  );
   if (result.entries.length > cap || result.truncated) {
     throw capExceeded(
       `files.grep: over ${cap} matches (the cap). Narrow the pattern or add a glob.`,
@@ -201,11 +206,13 @@ async function runGit(
   argv: readonly string[],
   maxInlineBytes: number,
 ): Promise<{ text: string; bytes: number; truncated: boolean }> {
-  const result = await deps.executionPort.run({
-    command: { mode: "argv", file: "git", args: [...argv] },
-    cwd: deps.cwd,
-    outputLimit: { maxInlineBytes },
-  });
+  const result = await withWorkflowIo(deps, () =>
+    deps.executionPort.run({
+      command: { mode: "argv", file: "git", args: [...argv] },
+      cwd: deps.cwd,
+      outputLimit: { maxInlineBytes },
+    }),
+  );
   if (result.status !== "completed" || (result.exitCode ?? 0) !== 0) {
     // git 缺失、非仓库、坏 ref 都走这里。归一成**可 catch 的** DriverError 而不是 run 级
     // 失败，使脚本可以通过 try/catch 改用 files.glob。
@@ -308,12 +315,14 @@ async function worldRun(deps: WorldReadDeps, args: unknown[]): Promise<WorldRunR
 
   const stdoutCap = WORLD_READ_CAPS.runStdoutMaxBytes;
   const stderrCap = WORLD_READ_CAPS.runStderrMaxBytes;
-  const result = await deps.executionPort.run({
-    command: { mode: "argv", file: cmd, args: argv },
-    cwd: deps.cwd,
-    timeoutMs,
-    outputLimit: { maxInlineBytes: Math.max(stdoutCap, stderrCap) + 1 },
-  });
+  const result = await withWorkflowIo(deps, () =>
+    deps.executionPort.run({
+      command: { mode: "argv", file: cmd, args: argv },
+      cwd: deps.cwd,
+      timeoutMs,
+      outputLimit: { maxInlineBytes: Math.max(stdoutCap, stderrCap) + 1 },
+    }),
+  );
 
   if (result.status === "timed_out") {
     throw new WorkflowError(

@@ -1,0 +1,28 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "strict": true,
+    "composite": false,
+    "incremental": false,
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "disableSourceOfProjectReferenceRedirect": true,
+    "types": ["node"]
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "src/**/*.d.ts",
+    "src/**/*.json",
+    "test/enterprise-share-entry/main.tsx",
+    "test/enterprise-share-entry/ports.ts"
+  ],
+  "references": [
+    { "path": "../provider" },
+    { "path": "../shared" },
+    { "path": "../services" },
+    { "path": "../rpc" }
+  ]
+}

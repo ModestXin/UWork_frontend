@@ -1,0 +1,29 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "strict": true,
+    "composite": false,
+    "incremental": false,
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "disableSourceOfProjectReferenceRedirect": true
+  },
+  "include": [
+    "test/enterpriseAssetStore.test.ts",
+    "test/enterpriseAssetSelection.test.ts",
+    "test/enterpriseAssetsHost.test.ts",
+    "test/enterpriseAssetsBridge.test.ts",
+    "test/enterpriseExpertAssets.test.ts",
+    "test/enterpriseSkillLoadBridge.test.ts",
+    "test/enterpriseSkillBodyPolicy.test.ts",
+    "test/uworkBackendSession.test.ts",
+    "test/enterpriseClientPresentation.test.ts",
+    "src/enterprise-identity/clientPresentation.ts",
+    "src/enterprise-assets/**/*.ts",
+    "src/enterprise-identity/backendSessionContract.ts",
+    "src/enterprise-identity/uworkBackendSession.ts"
+  ],
+  "references": [{ "path": "../shared" }, { "path": "../rpc" }]
+}

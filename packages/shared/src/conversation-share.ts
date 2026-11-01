@@ -55,6 +55,7 @@ export function localizeConversationShareUrl(shareUrl: string, locale: Locale): 
 }
 
 export const conversationShareAccessModeSchema = z.enum([
+  "organization",
   "private",
   "public_readonly",
   "public_importable",
@@ -362,6 +363,7 @@ export const conversationSharePreviewArtifactSchema =
  * 对外类型 ConversationSharePreview 是「解码后」的形状，不从这份 schema 推断。
  */
 export const conversationSharePreviewDataSchema = z.object({
+  can_revoke: z.boolean().optional(),
   schema_version: conversationShareSchemaVersionSchema,
   share: conversationSharePublicMetadataSchema,
   rows: z.array(z.unknown()),

@@ -54,6 +54,9 @@ export function createProviderProvisioningSource(
       ]);
       // 默认与规则来自同一份持锁读取，不能把两次读取的值拼成不存在的配置版本。
       const personalConfig = encodeProviderConfigFile(personal).config;
+      // Gateway名称属于本Host当前身份的派生事实，不能随个人配置导出给另一个Host。
+      for (const rule of personalConfig.providerConfigRules.providerRules)
+        delete rule.config.enterpriseModelNames;
       const accountSettings = {
         providerFamilyDomain: settings.providerFamilyDomain ?? null,
         providerFamilyConnectionSelections: settings.providerFamilyConnectionSelections ?? {},

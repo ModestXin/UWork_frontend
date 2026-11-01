@@ -402,7 +402,11 @@ export function useDraftConfigControl(params: {
           stateRef.current.draft.modelSelection !== original
         )
           return;
-        updateComposerDraft((current) => ({ ...current, modelSelection: selection }));
+        updateComposerDraft((current) => ({
+          ...current,
+          modelSelection: selection,
+          initializeFromNewTask: undefined,
+        }));
       };
     },
     [scopeKey, updateComposerDraft],

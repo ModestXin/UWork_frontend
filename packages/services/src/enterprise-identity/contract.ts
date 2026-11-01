@@ -6,12 +6,15 @@ import {
   type EnterpriseIdentityPollResult,
   type EnterpriseIdentitySession,
   type EnterpriseIdentityView,
+  type UWorkClientPresentation,
 } from "@zcode/shared";
 import { createServiceDescriptor } from "../descriptors.js";
 
 /** 应用级身份 RPC。视图与事件不包含 Token；不提供 Renderer 自行设置姓名的接口。 */
 export interface IEnterpriseIdentityService {
   getView(): Promise<EnterpriseIdentityView>;
+  /** 已发布文案、场景、帮助和有限桌面配置的无凭据投影；不授予任何执行权限。 */
+  readClientPresentation(): Promise<UWorkClientPresentation>;
   restoreSession(): Promise<EnterpriseIdentityView>;
   /**
    * 记住本机选择的组织（设备偏好，不参与授权判断）。必须出现在配置清单里，
@@ -50,4 +53,5 @@ export interface EnterpriseIdentityAdapter {
     signal: AbortSignal,
   ): Promise<EnterpriseIdentitySession | null>;
   revoke?(session: EnterpriseIdentitySession): Promise<void>;
+  cancel?(attemptId: string): Promise<void>;
 }

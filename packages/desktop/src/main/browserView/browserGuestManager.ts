@@ -2765,6 +2765,9 @@ export class BrowserGuestManager {
   }
 
   private async summary(tab: ManagedTab): Promise<BrowserTabSummary> {
+    // 公共 summary 不暴露内部 closed 状态；关闭后的单页操作按原取消路径返回。
+    const lifecycle = tab.lifecycle;
+    if (lifecycle === "closed") throw abortError();
     // guest 重绑恢复尚未完成时，替代 guest 仍可能报告 about:blank；各状态读取点
     // 都必须保留 logical cache，不能让临时 guest URL 覆盖后续恢复事实。
     if (tab.guest && !this.guestRecoveryFlights.has(tab.tabId)) {
@@ -3842,7 +3845,9 @@ export class BrowserGuestManager {
     tab: ManagedTab,
     guest: GuestWebContents,
   ): Promise<GuestWebContents | null> {
-    if (tab.lifecycle === "closed" || tab.guest !== guest) return null;
+    // await 期间原 tab/guest 可被关闭或替换，每次读取当前 owner，不能沿用旧窄化结果。
+    const ownsGuest = () => tab.lifecycle !== "closed" && tab.guest === guest;
+    if (!ownsGuest()) return null;
     const restored = await this.restoreGuestState(tab, guest);
     // await 期间 tab 可能被关闭；lifecycle 是可变字段，重新读取以撤销上面的收窄。
     const lifecycleAfterRestore = tab.lifecycle as TabLifecycle;

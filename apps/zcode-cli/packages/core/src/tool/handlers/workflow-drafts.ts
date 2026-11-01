@@ -22,6 +22,7 @@ import {
   WORKFLOW_DRAFTS_DIR,
   createWorkflowPhaseNames,
   type CreateWorkflowCausalityGraph,
+  type WorkflowExecutionAdmission,
 } from "@zcode/contracts";
 
 /**
@@ -62,6 +63,7 @@ export interface WriteWorkflowDraftInput {
   name: string;
   /** 要写下的字节，逐字不改（saved 来源连元数据块一起）。 */
   source: string;
+  admission?: WorkflowExecutionAdmission;
 }
 
 /**
@@ -75,28 +77,35 @@ export async function writeWorkflowDraft(
   input: WriteWorkflowDraftInput,
 ): Promise<{ path: string } | undefined> {
   if (input.cwd === undefined || input.cwd === "") return undefined;
+  const dir = path.join(input.cwd, WORKFLOW_DRAFTS_DIR);
+  // 授权回调在 IO catch 之外：撤权/取消不能被“没有草稿”的尽力而为分支吞掉。
+  await input.admission?.revalidate();
   try {
-    const dir = path.join(input.cwd, WORKFLOW_DRAFTS_DIR);
     await mkdir(dir, { recursive: true });
-    await writeDraftGitignore(dir);
-    const slug = workflowDraftSlug(input.name);
-    for (let attempt = 1; attempt <= WORKFLOW_DRAFT_MAX_ATTEMPTS; attempt += 1) {
-      const fileName = `${attempt === 1 ? slug : `${slug}-${attempt}`}${SAVED_WORKFLOW_FILE_EXTENSION}`;
-      const filePath = path.join(dir, fileName);
-      try {
-        // `wx`：文件已在就报 EEXIST，于是"取名"与"占名"是同一个原子动作。
-        await writeFile(filePath, input.source, { encoding: "utf8", flag: "wx" });
-        return { path: filePath };
-      } catch (error) {
-        if (errorCode(error) !== "EEXIST") throw error;
-      }
-    }
-    return undefined;
   } catch {
-    // 尽力而为：目录写不进、`.zcode` 是个文件、盘满……一律当作「这次没有草稿」。调用方据此
-    // 退回旧文案，工具调用本身照常完成。
     return undefined;
   }
+  await input.admission?.revalidate();
+  try {
+    await writeDraftGitignore(dir);
+  } catch {
+    return undefined;
+  }
+  const slug = workflowDraftSlug(input.name);
+  for (let attempt = 1; attempt <= WORKFLOW_DRAFT_MAX_ATTEMPTS; attempt += 1) {
+    const fileName = `${attempt === 1 ? slug : `${slug}-${attempt}`}${SAVED_WORKFLOW_FILE_EXTENSION}`;
+    const filePath = path.join(dir, fileName);
+    await input.admission?.revalidate();
+    try {
+      await writeFile(filePath, input.source, { encoding: "utf8", flag: "wx" });
+    } catch (error) {
+      if (errorCode(error) === "EEXIST") continue;
+      return undefined;
+    }
+    await input.admission?.revalidate();
+    return { path: filePath };
+  }
+  return undefined;
 }
 
 /**

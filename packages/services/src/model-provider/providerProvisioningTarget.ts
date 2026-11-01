@@ -56,6 +56,7 @@ export function createProviderProvisioningTarget(
   return {
     async apply(input: ProviderProvisioningEnvelope): Promise<ProviderProvisioningResult> {
       const envelope = providerProvisioningEnvelopeSchema.parse(input);
+      const personalUpdate = parsePersonalConfig(envelope);
       return withFileLock(options.stateFilePath, async () => {
         const previousState = await readStateFile(options.stateFilePath);
         const previousResult = previousState?.records.find(
@@ -76,7 +77,6 @@ export function createProviderProvisioningTarget(
         );
         await options.providerRuntime.start();
         const before = await captureBeforeState(envelope, options);
-        const personalUpdate = parsePersonalConfig(envelope);
         const applied: AppliedProvisioningState = {
           settings: false,
           settingsExpected: envelope.accountSettings,
@@ -192,6 +192,18 @@ interface AppliedProvisioningState {
 }
 
 function parsePersonalConfig(envelope: ProviderProvisioningEnvelope): ProviderConfigLayerUpdate {
+  // 完整codec可读取本机私有字段；远端信封却没有Gateway owner，必须在任何写入前拒绝。
+  for (const rule of envelope.personalConfig.providerConfigRules.providerRules) {
+    if (
+      rule !== null &&
+      typeof rule === "object" &&
+      "config" in rule &&
+      rule.config !== null &&
+      typeof rule.config === "object" &&
+      Object.hasOwn(rule.config, "enterpriseModelNames")
+    )
+      throw new Error("enterprise_model_names_private_only");
+  }
   // 信封与本地保存复用正式 Personal codec，不在接收端另建字段清单或模式判断。
   return decodeProviderConfigFile({ schemaVersion: 1, config: envelope.personalConfig });
 }

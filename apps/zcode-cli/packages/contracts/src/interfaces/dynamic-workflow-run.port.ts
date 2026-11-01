@@ -114,6 +114,12 @@ export interface DynamicWorkflowRunSubmitRequest {
 
 export interface DynamicWorkflowRunSubmitOptions {
   signal?: AbortSignal;
+  /** 本次操作的私有 owner fence；仅进程内传递，不进入模型、journal 或 VM。 */
+  admission?: WorkflowExecutionAdmission;
+}
+
+export interface WorkflowExecutionAdmission {
+  revalidate(signal?: AbortSignal): Promise<void>;
 }
 
 /**
@@ -727,7 +733,10 @@ export interface DynamicWorkflowRunPort {
    * **可选成员**，照 {@link listEvents} 之前 cancel 的先例（消费方 `typeof` 探测）：
    * 端口 stub 不必为 resume 面全员陪跑；对消费方「端口缺席」与「方法缺席」是同一个业务失败。
    */
-  resume?(runId: string): Promise<DynamicWorkflowRunResumeResult>;
+  resume?(
+    runId: string,
+    options?: DynamicWorkflowRunSubmitOptions,
+  ): Promise<DynamicWorkflowRunResumeResult>;
   /**
    * 枚举**本服务父会话**名下的 run 摘要（最近更新在前，journal-backed）。UI 的重启后发现面：
    * `workflowRuns` 投影跨进程不存活，工具卡 join 与 Resume 按钮的可用性只能从这里还原。

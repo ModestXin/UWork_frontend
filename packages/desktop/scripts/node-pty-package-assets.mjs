@@ -2,6 +2,11 @@ import { cpSync, existsSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 
+import {
+  resolveNodePtyNativePath,
+  resolveNodePtyPrebuildAssets,
+} from "../../../scripts/node-pty-prebuild-assets.mjs";
+
 const require = createRequire(import.meta.url);
 
 export function restoreTargetNodePtyPrebuild({ desktopPackageRoot, targetPlatform }) {
@@ -12,10 +17,10 @@ export function restoreTargetNodePtyPrebuild({ desktopPackageRoot, targetPlatfor
 
   const platformKey = targetPlatform.key;
   const sourcePackageName = `@lydell/node-pty-${platformKey}`;
-  let sourceBinaryPath;
+  let sourcePackageRoot;
 
   try {
-    sourceBinaryPath = resolveSourceNodePtyPrebuildPath({ sourcePackageName, platformKey });
+    sourcePackageRoot = resolveSourcePackageRoot({ sourcePackageName, desktopPackageRoot });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`缺少 ${sourcePackageName}，无法为 ${platformKey} 打包 node-pty: ${message}`);
@@ -24,6 +29,11 @@ export function restoreTargetNodePtyPrebuild({ desktopPackageRoot, targetPlatfor
   const nodePtyPackageRoot = dirname(
     require.resolve("node-pty/package.json", { paths: [desktopPackageRoot] }),
   );
+  const { nativePath: sourceBinaryPath } = resolveNodePtyPrebuildAssets({
+    jsPackageRoot: nodePtyPackageRoot,
+    nativePackageRoot: sourcePackageRoot,
+    platformKey,
+  });
   const targetPrebuildDir = resolve(nodePtyPackageRoot, "prebuilds", platformKey);
   const targetBinaryPath = resolve(targetPrebuildDir, "pty.node");
 
@@ -41,21 +51,24 @@ export function restoreTargetNodePtyPrebuild({ desktopPackageRoot, targetPlatfor
 }
 
 export function resolveSourceNodePtyPrebuildPath({ sourcePackageName, platformKey }) {
-  const sourcePackageEntry = require.resolve(sourcePackageName);
+  return resolveNodePtyNativePath(resolveSourcePackageRoot({ sourcePackageName }), platformKey);
+}
+
+function resolveSourcePackageRoot({ sourcePackageName, desktopPackageRoot }) {
+  const options = desktopPackageRoot ? { paths: [desktopPackageRoot] } : undefined;
+  try {
+    // 原 1.1 平台包只有 package.json/pty.node，没有可解析的 JS 入口。
+    return dirname(require.resolve(`${sourcePackageName}/package.json`, options));
+  } catch (error) {
+    if (error.code !== "ERR_PACKAGE_PATH_NOT_EXPORTED") throw error;
+  }
+  const sourcePackageEntry = require.resolve(sourcePackageName, options);
   let currentDir = dirname(sourcePackageEntry);
-
   while (currentDir !== dirname(currentDir)) {
-    const candidatePath = resolve(currentDir, "prebuilds", platformKey, "pty.node");
-    if (existsSync(candidatePath)) return candidatePath;
-
+    if (existsSync(resolve(currentDir, "package.json"))) return currentDir;
     currentDir = dirname(currentDir);
   }
-
-  // @lydell/node-pty-linux-* 通过 package exports 只暴露 lib/index.js，
-  // 不能再解析 package.json。这里从公开入口向上寻找 prebuilds，兼容 exports 限制。
-  throw new Error(
-    `缺少 node-pty 预编译产物: ${sourcePackageName}/prebuilds/${platformKey}/pty.node`,
-  );
+  throw new Error(`无法定位 node-pty 平台包: ${sourcePackageName}`);
 }
 
 export function resolvePackagedNodePtyPrebuildPath({ resourcesDir, platformKey }) {

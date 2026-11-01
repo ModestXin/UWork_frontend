@@ -10,7 +10,7 @@ import {
   readdir,
   writeFile,
 } from "node:fs/promises";
-import { existsSync, type Dirent } from "node:fs";
+import type { Dirent } from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -27,6 +27,14 @@ import type {
 } from "@zcode/shared";
 import { DEFAULT_ENABLED_OFFICIAL_PLUGIN_IDS, UWORK_PLUGIN_MANIFEST_DIR } from "@zcode/shared";
 import type { ISkillsService } from "./skills.js";
+import type { UWorkBackendSession } from "../enterprise-identity/backendSessionContract.js";
+import {
+  copyManagedSkillDirectory,
+  isSkillAccessError,
+  skillIO,
+  withPersonalSkillAccess,
+  type SkillAccess,
+} from "./skillAccess.js";
 import { SKILL_FILE_NAME, walkSkillMarkdownPaths } from "./skillDiscoveryWalk.js";
 import { readInstalledPluginRoots } from "#src/plugins/installedPluginRoots.js";
 import {
@@ -71,6 +79,7 @@ function resolveUserHomeDir() {
 
 interface SkillsServiceOptions {
   isDesktopRuntime?: boolean;
+  backendSession?: UWorkBackendSession;
 }
 
 /** ZCode Agent 工作区级技能目录。 */
@@ -97,42 +106,54 @@ function normalizeSkillNameKey(name: string): string {
   return name.trim().toLowerCase();
 }
 
-async function readSkillNameKey(skillPath: string): Promise<string> {
+async function readSkillNameKey(skillPath: string, skillAccess?: SkillAccess): Promise<string> {
   const fallbackName = basename(dirname(skillPath));
   try {
-    const parsed = readFrontmatter(await readFile(skillPath, "utf-8"));
+    const parsed = readFrontmatter(await skillIO(skillAccess, () => readFile(skillPath, "utf-8")));
     const rawName = parsed.hasFrontmatter ? parsed.name.trim() : fallbackName;
     return normalizeSkillNameKey(rawName || fallbackName);
-  } catch {
+  } catch (error) {
+    if (isSkillAccessError(error)) throw error;
     return normalizeSkillNameKey(fallbackName);
   }
 }
 
-async function collectSkillNameKeysInRoot(rootPath: string): Promise<Set<string>> {
+async function collectSkillNameKeysInRoot(
+  rootPath: string,
+  skillAccess?: SkillAccess,
+): Promise<Set<string>> {
   const nameKeys = new Set<string>();
-  if (!(await exists(rootPath))) {
+  if (!(await exists(rootPath, skillAccess))) {
     return nameKeys;
   }
   const diagnostics: SkillDiagnostic[] = [];
-  for (const skillPath of await collectSkillMarkdownPaths(rootPath, diagnostics)) {
-    nameKeys.add(await readSkillNameKey(skillPath));
+  for (const skillPath of await collectSkillMarkdownPaths(rootPath, diagnostics, skillAccess)) {
+    nameKeys.add(await readSkillNameKey(skillPath, skillAccess));
   }
   return nameKeys;
 }
 
-async function isUserAgentsSkillCoveredByZcode(params: {
-  skillPath: string;
-  rootPath: string;
-  userZcodeSkillNameKeys: Set<string>;
-}): Promise<boolean> {
+async function isUserAgentsSkillCoveredByZcode(
+  params: {
+    skillPath: string;
+    rootPath: string;
+    userZcodeSkillNameKeys: Set<string>;
+  },
+  skillAccess?: SkillAccess,
+): Promise<boolean> {
   const { skillPath, rootPath, userZcodeSkillNameKeys } = params;
   if (rootPath !== getUserAgentsSkillRoot()) {
     return false;
   }
-  if (await exists(join(getUserZcodeSkillRoot(), basename(dirname(skillPath)), SKILL_FILE_NAME))) {
+  if (
+    await exists(
+      join(getUserZcodeSkillRoot(), basename(dirname(skillPath)), SKILL_FILE_NAME),
+      skillAccess,
+    )
+  ) {
     return true;
   }
-  return userZcodeSkillNameKeys.has(await readSkillNameKey(skillPath));
+  return userZcodeSkillNameKeys.has(await readSkillNameKey(skillPath, skillAccess));
 }
 
 /**
@@ -141,8 +162,11 @@ async function isUserAgentsSkillCoveredByZcode(params: {
  * 对齐 apps/zcode-cli/packages/adapters/src/skills/roots.ts:60-72。
  * 找不到 .git 时退回 workspacePath 自身。
  */
-async function resolveAncestorWorkspaceRoots(workspacePath: string): Promise<string[]> {
-  const worktreeRoot = await findWorktreeRoot(workspacePath);
+async function resolveAncestorWorkspaceRoots(
+  workspacePath: string,
+  skillAccess?: SkillAccess,
+): Promise<string[]> {
+  const worktreeRoot = await findWorktreeRoot(workspacePath, skillAccess);
   const baseDirectories: string[] = [];
   if (!worktreeRoot) {
     baseDirectories.push(workspacePath);
@@ -167,10 +191,13 @@ async function resolveAncestorWorkspaceRoots(workspacePath: string): Promise<str
   return roots;
 }
 
-async function findWorktreeRoot(workingDirectory: string): Promise<string | null> {
+async function findWorktreeRoot(
+  workingDirectory: string,
+  skillAccess?: SkillAccess,
+): Promise<string | null> {
   let current = workingDirectory;
   while (true) {
-    if (await exists(join(current, GIT_MARKER))) return current;
+    if (await exists(join(current, GIT_MARKER), skillAccess)) return current;
     const parent = dirname(current);
     if (parent === current) return null;
     current = parent;
@@ -194,10 +221,13 @@ function normalizeScanRootPath(path: string): string {
  * 同一目录被不同路径形式扫到时，同一 SKILL.md 会因路径字符串不同重复出现。
  * 若子目录尚不存在，仍保留父目录以兼容非标准布局。
  */
-async function filterNestedScanRoots(paths: string[]): Promise<string[]> {
+async function filterNestedScanRoots(
+  paths: string[],
+  skillAccess?: SkillAccess,
+): Promise<string[]> {
   const existing = new Set<string>();
   for (const path of paths) {
-    if (await exists(path)) {
+    if (await exists(path, skillAccess)) {
       existing.add(normalizeScanRootPath(path));
     }
   }
@@ -216,13 +246,18 @@ async function filterNestedScanRoots(paths: string[]): Promise<string[]> {
   });
 }
 
-async function dedupeScanRootsByRealpath(paths: string[]): Promise<string[]> {
+async function dedupeScanRootsByRealpath(
+  paths: string[],
+  skillAccess?: SkillAccess,
+): Promise<string[]> {
   const seen = new Set<string>();
   const result: string[] = [];
-  for (const path of await filterNestedScanRoots(paths)) {
+  for (const path of await filterNestedScanRoots(paths, skillAccess)) {
     let canonical = normalizeScanRootPath(path);
-    if (await exists(path)) {
-      canonical = normalizeScanRootPath(await realpath(path).catch(() => path));
+    if (await exists(path, skillAccess)) {
+      canonical = normalizeScanRootPath(
+        await skillIO(skillAccess, () => realpath(path).catch(() => path)),
+      );
     }
     if (seen.has(canonical)) {
       continue;
@@ -279,21 +314,26 @@ function buildActivatedSkillsPromptBlock(skills: SkillSummary[]): string {
   ].join("\n");
 }
 
-async function appendSkillsAuditLog(params: {
-  workspacePath: string;
-  workspaceIdentity?: string;
-  activatedSkillNames: string[];
-}): Promise<void> {
-  await mkdir(getAppConfigDir(), { recursive: true });
-  await appendFile(
-    join(getAppConfigDir(), "skills-audit.log"),
-    `${JSON.stringify({
-      createdAt: Date.now(),
-      workspacePath: params.workspacePath,
-      workspaceIdentity: params.workspaceIdentity ?? null,
-      activatedSkillNames: params.activatedSkillNames,
-    })}\n`,
-    "utf-8",
+async function appendSkillsAuditLog(
+  params: {
+    workspacePath: string;
+    workspaceIdentity?: string;
+    activatedSkillNames: string[];
+  },
+  skillAccess?: SkillAccess,
+): Promise<void> {
+  await skillIO(skillAccess, () => mkdir(getAppConfigDir(), { recursive: true }));
+  await skillIO(skillAccess, () =>
+    appendFile(
+      join(getAppConfigDir(), "skills-audit.log"),
+      `${JSON.stringify({
+        createdAt: Date.now(),
+        workspacePath: params.workspacePath,
+        workspaceIdentity: params.workspaceIdentity ?? null,
+        activatedSkillNames: params.activatedSkillNames,
+      })}\n`,
+      "utf-8",
+    ),
   );
 }
 
@@ -489,9 +529,12 @@ function readFrontmatterString(value: unknown): string {
   return String(value);
 }
 
-async function readSkillMetadata(skillPath: string): Promise<SkillMetadata | undefined> {
+async function readSkillMetadata(
+  skillPath: string,
+  skillAccess?: SkillAccess,
+): Promise<SkillMetadata | undefined> {
   const metaPath = join(dirname(skillPath), SKILL_META_FILE_NAME);
-  const raw = await readFile(metaPath, "utf-8").catch(() => null);
+  const raw = await skillIO(skillAccess, () => readFile(metaPath, "utf-8").catch(() => null));
   if (!raw) {
     return undefined;
   }
@@ -520,25 +563,28 @@ async function readSkillMetadata(skillPath: string): Promise<SkillMetadata | und
   }
 }
 
-async function exists(path: string): Promise<boolean> {
-  try {
-    await access(path);
-    return true;
-  } catch {
-    return false;
-  }
+async function exists(path: string, skillAccess?: SkillAccess): Promise<boolean> {
+  return skillIO(skillAccess, async () => {
+    try {
+      await access(path);
+      return true;
+    } catch {
+      return false;
+    }
+  });
 }
 
 function normalizeSkillConfigPath(path: string): string {
   return path.replaceAll("\\", "/");
 }
 
-async function readCliConfigFile(): Promise<Record<string, unknown>> {
+async function readCliConfigFile(skillAccess?: SkillAccess): Promise<Record<string, unknown>> {
   try {
-    const raw = await readFile(getUworkUserCliConfigPath(), "utf-8");
+    const raw = await skillIO(skillAccess, () => readFile(getUworkUserCliConfigPath(), "utf-8"));
     const parsed = JSON.parse(raw) as unknown;
     return isObjectRecord(parsed) ? parsed : {};
-  } catch {
+  } catch (error) {
+    if (isSkillAccessError(error)) throw error;
     return {};
   }
 }
@@ -558,12 +604,15 @@ function readSkillEnabledMapFromConfig(config: Record<string, unknown>): Record<
   return result;
 }
 
-async function readSkillEnabledMap(): Promise<Record<string, boolean>> {
-  return readSkillEnabledMapFromConfig(await readCliConfigFile());
+async function readSkillEnabledMap(skillAccess?: SkillAccess): Promise<Record<string, boolean>> {
+  return readSkillEnabledMapFromConfig(await readCliConfigFile(skillAccess));
 }
 
-async function writeSkillEnabledMap(next: Record<string, boolean>): Promise<void> {
-  const config = await readCliConfigFile();
+async function writeSkillEnabledMap(
+  next: Record<string, boolean>,
+  skillAccess?: SkillAccess,
+): Promise<void> {
+  const config = await readCliConfigFile(skillAccess);
   const skillsConfig = isObjectRecord(config.skills) ? config.skills : {};
   for (const [path, enable] of Object.entries(next).sort(([left], [right]) =>
     left.localeCompare(right),
@@ -583,8 +632,10 @@ async function writeSkillEnabledMap(next: Record<string, boolean>): Promise<void
   } else {
     delete config.skills;
   }
-  await mkdir(getUworkUserCliRootDir(), { recursive: true });
-  await writeFile(getUworkUserCliConfigPath(), `${JSON.stringify(config, null, 2)}\n`, "utf-8");
+  await skillIO(skillAccess, () => mkdir(getUworkUserCliRootDir(), { recursive: true }));
+  await skillIO(skillAccess, () =>
+    writeFile(getUworkUserCliConfigPath(), `${JSON.stringify(config, null, 2)}\n`, "utf-8"),
+  );
 }
 
 interface SkillRootDescriptor {
@@ -718,15 +769,19 @@ async function scanOfficialPluginCacheRoots(pluginStorageRoot: string): Promise<
   return roots.sort((left, right) => left.localeCompare(right));
 }
 
-async function readPluginManifest(rootPath: string): Promise<PluginManifestSummary | null> {
-  const manifestPath = await findPluginManifestPath(rootPath);
+async function readPluginManifest(
+  rootPath: string,
+  skillAccess?: SkillAccess,
+): Promise<PluginManifestSummary | null> {
+  const manifestPath = await findPluginManifestPath(rootPath, skillAccess);
   if (!manifestPath) {
     return null;
   }
   let raw: string;
   try {
-    raw = await readFile(manifestPath, "utf-8");
-  } catch {
+    raw = await skillIO(skillAccess, () => readFile(manifestPath, "utf-8"));
+  } catch (error) {
+    if (isSkillAccessError(error)) throw error;
     return null;
   }
   try {
@@ -744,7 +799,10 @@ async function readPluginManifest(rootPath: string): Promise<PluginManifestSumma
   }
 }
 
-async function findPluginManifestPath(rootPath: string): Promise<string | null> {
+async function findPluginManifestPath(
+  rootPath: string,
+  skillAccess?: SkillAccess,
+): Promise<string | null> {
   // 与 Agent 加载器保持同一顺序，避免新清单已可运行但技能面板仍读取旧组件声明。
   for (const manifestPath of [
     join(rootPath, UWORK_PLUGIN_MANIFEST_PATH),
@@ -752,17 +810,20 @@ async function findPluginManifestPath(rootPath: string): Promise<string | null> 
     join(rootPath, CLAUDE_PLUGIN_MANIFEST_PATH),
     join(rootPath, CODEX_PLUGIN_MANIFEST_PATH),
   ]) {
-    if (await exists(manifestPath)) {
+    if (await exists(manifestPath, skillAccess)) {
       return manifestPath;
     }
   }
   return null;
 }
 
-function resolvePluginSkillRoots(params: {
-  manifest: PluginManifestSummary;
-  rootPath: string;
-}): string[] {
+async function resolvePluginSkillRoots(
+  params: {
+    manifest: PluginManifestSummary;
+    rootPath: string;
+  },
+  skillAccess?: SkillAccess,
+): Promise<string[]> {
   const roots: string[] = [];
   for (const rawPath of parsePathList(params.manifest.skills)) {
     const rootPath = resolveInside(params.rootPath, rawPath);
@@ -772,22 +833,28 @@ function resolvePluginSkillRoots(params: {
   }
   if (roots.length === 0 && params.manifest.skills === undefined) {
     const defaultRoot = join(params.rootPath, "skills");
-    if (existsSync(defaultRoot)) {
+    if (await exists(defaultRoot, skillAccess)) {
       roots.push(defaultRoot);
     }
   }
   return roots;
 }
 
-async function resolvePluginSkillRootDescriptors(): Promise<SkillRootDescriptor[]> {
-  const config = readPluginConfigFromConfig(await readCliConfigFile());
+async function resolvePluginSkillRootDescriptors(
+  skillAccess?: SkillAccess,
+): Promise<SkillRootDescriptor[]> {
+  const config = readPluginConfigFromConfig(await readCliConfigFile(skillAccess));
   if (!config.enabled) {
     return [];
   }
 
   const pluginStorageRoot = resolvePluginStorageRoot(config.storageDir);
-  const officialCacheRoots = await scanOfficialPluginCacheRoots(pluginStorageRoot);
-  const installedRoots = await readInstalledPluginRoots(pluginStorageRoot);
+  const officialCacheRoots = await skillIO(skillAccess, () =>
+    scanOfficialPluginCacheRoots(pluginStorageRoot),
+  );
+  const installedRoots = await skillIO(skillAccess, () =>
+    readInstalledPluginRoots(pluginStorageRoot),
+  );
   const candidates: PluginRootCandidate[] = [
     ...config.dirs.map((dir) => ({
       defaultEnabled: true,
@@ -805,7 +872,7 @@ async function resolvePluginSkillRootDescriptors(): Promise<SkillRootDescriptor[
   const seenPluginIds = new Set<string>();
 
   for (const candidate of candidates) {
-    const manifest = await readPluginManifest(candidate.rootPath);
+    const manifest = await readPluginManifest(candidate.rootPath, skillAccess);
     if (!manifest) {
       continue;
     }
@@ -832,7 +899,10 @@ async function resolvePluginSkillRootDescriptors(): Promise<SkillRootDescriptor[
     // agent runtime 已经从 plugin manifest 注入 skillRoots，但 UI 的 skillsService
     // 之前只扫描内置官方 cache/手动目录，漏掉 marketplace installed_plugins.json 中的
     // 个人来源市场（claude-plugins-official、自建市场等）插件，导致插件详情页只有技能数量、没有技能名。
-    for (const rootPath of resolvePluginSkillRoots({ manifest, rootPath: candidate.rootPath })) {
+    for (const rootPath of await resolvePluginSkillRoots(
+      { manifest, rootPath: candidate.rootPath },
+      skillAccess,
+    )) {
       descriptors.push({
         scope: "plugin",
         rootPath,
@@ -845,13 +915,18 @@ async function resolvePluginSkillRootDescriptors(): Promise<SkillRootDescriptor[
   return descriptors;
 }
 
-async function discoverSkills(params: {
-  workspacePath: string;
-  workspaceIdentity?: string;
-  includeUserSkills: boolean;
-  provider: ZCodeProvider;
-}): Promise<DiscoverResult> {
-  const workspaceRoots = dedupeRoots(await resolveAncestorWorkspaceRoots(params.workspacePath));
+async function discoverSkills(
+  params: {
+    workspacePath: string;
+    workspaceIdentity?: string;
+    includeUserSkills: boolean;
+    provider: ZCodeProvider;
+  },
+  skillAccess?: SkillAccess,
+): Promise<DiscoverResult> {
+  const workspaceRoots = dedupeRoots(
+    await resolveAncestorWorkspaceRoots(params.workspacePath, skillAccess),
+  );
   const roots: SkillRootDescriptor[] = workspaceRoots.map((rootPath) => ({
     scope: "workspace" as const,
     rootPath,
@@ -868,15 +943,18 @@ async function discoverSkills(params: {
       rootPath: getUserAgentsSkillRoot(),
     });
   }
-  roots.push(...(await resolvePluginSkillRootDescriptors()));
+  roots.push(...(await resolvePluginSkillRootDescriptors(skillAccess)));
 
   const diagnostics: SkillDiagnostic[] = [];
   const skills: SkillSummary[] = [];
   const seenSkillPaths = new Set<string>();
   const userZcodeSkillNameKeys = params.includeUserSkills
-    ? await collectSkillNameKeysInRoot(getUserZcodeSkillRoot())
+    ? await collectSkillNameKeysInRoot(getUserZcodeSkillRoot(), skillAccess)
     : new Set<string>();
-  const scanRootPaths = await dedupeScanRootsByRealpath(roots.map((root) => root.rootPath));
+  const scanRootPaths = await dedupeScanRootsByRealpath(
+    roots.map((root) => root.rootPath),
+    skillAccess,
+  );
   const rootByPath = new Map(roots.map((root) => [root.rootPath, root]));
 
   for (const rootPath of scanRootPaths) {
@@ -884,33 +962,39 @@ async function discoverSkills(params: {
     if (!root) {
       continue;
     }
-    if (!(await exists(root.rootPath))) {
+    if (!(await exists(root.rootPath, skillAccess))) {
       continue;
     }
 
-    const skillPaths = await collectSkillMarkdownPaths(root.rootPath, diagnostics);
+    const skillPaths = await collectSkillMarkdownPaths(root.rootPath, diagnostics, skillAccess);
     for (const skillPath of skillPaths) {
       if (
-        await isUserAgentsSkillCoveredByZcode({
-          skillPath,
-          rootPath: root.rootPath,
-          userZcodeSkillNameKeys,
-        })
+        await isUserAgentsSkillCoveredByZcode(
+          {
+            skillPath,
+            rootPath: root.rootPath,
+            userZcodeSkillNameKeys,
+          },
+          skillAccess,
+        )
       ) {
         continue;
       }
-      const canonicalSkillPath = await realpath(skillPath).catch(() => skillPath);
+      const canonicalSkillPath = await skillIO(skillAccess, () =>
+        realpath(skillPath).catch(() => skillPath),
+      );
       if (seenSkillPaths.has(canonicalSkillPath)) {
         continue;
       }
       seenSkillPaths.add(canonicalSkillPath);
-      if (!(await exists(skillPath))) {
+      if (!(await exists(skillPath, skillAccess))) {
         continue;
       }
       let markdown: string;
       try {
-        markdown = await readFile(skillPath, "utf-8");
+        markdown = await skillIO(skillAccess, () => readFile(skillPath, "utf-8"));
       } catch (error) {
+        if (isSkillAccessError(error)) throw error;
         diagnostics.push({
           code: "skill_read_failed",
           severity: "warning",
@@ -952,7 +1036,7 @@ async function discoverSkills(params: {
       // 这些字段不影响 ZCode 读取 name/description，继续报 warning 只会制造无操作价值的噪音。
 
       const body = parsed.body.trim();
-      const metadata = await readSkillMetadata(skillPath);
+      const metadata = await readSkillMetadata(skillPath, skillAccess);
       skills.push({
         id: buildSkillId({
           provider: params.provider,
@@ -993,23 +1077,27 @@ async function discoverSkills(params: {
 async function collectSkillMarkdownPaths(
   rootPath: string,
   diagnostics: SkillDiagnostic[],
+  skillAccess?: SkillAccess,
 ): Promise<string[]> {
-  // 复用共享的有界遍历：支持分组目录，但排除 node_modules 等内容目录、限制深度、对软链按 realpath 去重，
-  // 避免 Windows junction / 巨型依赖目录把单次扫描放大到数十秒。
-  const discovered = new Set<string>();
-  for await (const skillPath of walkSkillMarkdownPaths(rootPath, {
-    onError: (path, error) => {
-      diagnostics.push({
-        code: "skill_scan_failed",
-        severity: "warning",
-        message: error instanceof Error ? error.message : `Failed to scan skill directory: ${path}`,
-        path,
-      });
-    },
-  })) {
-    discovered.add(skillPath);
-  }
-  return [...discovered].sort((left, right) => left.localeCompare(right));
+  return skillIO(skillAccess, async () => {
+    // 复用共享的有界遍历：支持分组目录，但排除 node_modules 等内容目录、限制深度、对软链按 realpath 去重，
+    // 避免 Windows junction / 巨型依赖目录把单次扫描放大到数十秒。
+    const discovered = new Set<string>();
+    for await (const skillPath of walkSkillMarkdownPaths(rootPath, {
+      onError: (path, error) => {
+        diagnostics.push({
+          code: "skill_scan_failed",
+          severity: "warning",
+          message:
+            error instanceof Error ? error.message : `Failed to scan skill directory: ${path}`,
+          path,
+        });
+      },
+    })) {
+      discovered.add(skillPath);
+    }
+    return [...discovered].sort((left, right) => left.localeCompare(right));
+  });
 }
 
 function resolveCapabilities(options?: SkillsServiceOptions): SkillsCapability {
@@ -1032,213 +1120,264 @@ function attachEnabledState(
 
 export function createSkillsService(options?: SkillsServiceOptions): ISkillsService {
   let writeQueue = Promise.resolve();
-
-  return {
-    async list(params: {
-      workspacePath: string;
-      workspaceIdentity?: string;
-      provider?: ZCodeProvider;
-    }): Promise<SkillsListResult> {
-      const capability = resolveCapabilities(options);
-      const provider = "glm";
-      const { skills: discovered, diagnostics } = await discoverSkills({
+  const run = <T>(work: (skillAccess?: SkillAccess) => Promise<T>, readWork = false) =>
+    withPersonalSkillAccess(options?.backendSession, work, {
+      readWork,
+      failureCode: readWork ? "enterprise_skill_read_failed" : "enterprise_skill_management_failed",
+    });
+  const listRaw = async (
+    params: Parameters<ISkillsService["list"]>[0],
+    skillAccess?: SkillAccess,
+  ): Promise<SkillsListResult> => {
+    const capability = resolveCapabilities(options);
+    const provider = "glm";
+    const { skills: discovered, diagnostics } = await discoverSkills(
+      {
         workspacePath: params.workspacePath,
         workspaceIdentity: params.workspaceIdentity,
         includeUserSkills: capability.userScopeAvailable,
         provider,
-      });
-      const enabledByPath = await readSkillEnabledMap();
-      return {
-        skills: attachEnabledState(discovered, enabledByPath),
-        capability,
-        diagnostics,
-      };
-    },
+      },
+      skillAccess,
+    );
+    const enabledByPath = await readSkillEnabledMap(skillAccess);
+    return {
+      skills: attachEnabledState(discovered, enabledByPath),
+      capability,
+      diagnostics,
+    };
+  };
 
-    async setEnabled(params: {
-      workspacePath: string;
-      workspaceIdentity?: string;
-      provider?: ZCodeProvider;
-      scope?: SkillScope;
-      skillId: string;
-      enabled: boolean;
-    }): Promise<void> {
-      const runUpdate = async () => {
-        const provider = "glm";
-        const capability = resolveCapabilities(options);
-        const { skills } = await discoverSkills({
-          workspacePath: params.workspacePath,
-          workspaceIdentity: params.workspaceIdentity,
-          includeUserSkills: capability.userScopeAvailable,
-          provider,
-        });
-        const skill = skills.find((item) => item.id === params.skillId);
-        if (!skill) {
-          throw new Error(`Skill not found: ${params.skillId}`);
-        }
-        const enabledByPath = await readSkillEnabledMap();
-        enabledByPath[normalizeSkillConfigPath(skill.path)] = params.enabled;
-        await writeSkillEnabledMap(enabledByPath);
-      };
+  const setEnabledRaw = async (
+    params: Parameters<ISkillsService["setEnabled"]>[0],
+    skillAccess?: SkillAccess,
+  ): Promise<void> => {
+    const provider = "glm";
+    const capability = resolveCapabilities(options);
+    const { skills } = await discoverSkills(
+      {
+        workspacePath: params.workspacePath,
+        workspaceIdentity: params.workspaceIdentity,
+        includeUserSkills: capability.userScopeAvailable,
+        provider,
+      },
+      skillAccess,
+    );
+    const skill = skills.find((item) => item.id === params.skillId);
+    if (!skill) {
+      throw new Error(`Skill not found: ${params.skillId}`);
+    }
+    const enabledByPath = await readSkillEnabledMap(skillAccess);
+    enabledByPath[normalizeSkillConfigPath(skill.path)] = params.enabled;
+    await writeSkillEnabledMap(enabledByPath, skillAccess);
+  };
 
-      const queued = writeQueue.then(runUpdate, runUpdate);
-      writeQueue = queued.catch(() => {});
-      await queued;
-    },
+  const buildPromptContextRaw = async (
+    params: Parameters<ISkillsService["buildPromptContext"]>[0],
+    skillAccess?: SkillAccess,
+  ): Promise<SkillsPromptContext> => {
+    const mentionedSkillNames = collectMentionedSkillNames(params.prompt);
+    if (mentionedSkillNames.size === 0) {
+      return { prompt: params.prompt, activatedSkillNames: [] };
+    }
 
-    async buildPromptContext(params: {
-      workspacePath: string;
-      workspaceIdentity?: string;
-      provider?: ZCodeProvider;
-      prompt: string;
-    }): Promise<SkillsPromptContext> {
-      const mentionedSkillNames = collectMentionedSkillNames(params.prompt);
-      if (mentionedSkillNames.size === 0) {
-        return { prompt: params.prompt, activatedSkillNames: [] };
-      }
-
-      const { skills } = await this.list({
+    const { skills } = await listRaw(
+      {
         workspacePath: params.workspacePath,
         workspaceIdentity: params.workspaceIdentity,
         provider: params.provider,
-      });
-      const activatedSkills = skills.filter(
-        (skill) => skill.enabled && mentionedSkillNames.has(skill.name),
-      );
-      if (activatedSkills.length === 0) {
-        return { prompt: params.prompt, activatedSkillNames: [] };
-      }
+      },
+      skillAccess,
+    );
+    const activatedSkills = skills.filter(
+      (skill) => skill.enabled && mentionedSkillNames.has(skill.name),
+    );
+    if (activatedSkills.length === 0) {
+      return { prompt: params.prompt, activatedSkillNames: [] };
+    }
 
-      const activatedSkillNames = activatedSkills.map((skill) => skill.name);
-      // 技能目录是可见资源，但不能在每次 session 发送时全量注入。
-      // 只有用户在 prompt 中显式提到且当前启用的技能才进入上下文，避免技能状态从 UI 列表泄漏到 agent 核心 session。
-      await appendSkillsAuditLog({
+    const activatedSkillNames = activatedSkills.map((skill) => skill.name);
+    // 技能目录是可见资源，但不能在每次 session 发送时全量注入。
+    // 只有用户在 prompt 中显式提到且当前启用的技能才进入上下文，避免技能状态从 UI 列表泄漏到 agent 核心 session。
+    await appendSkillsAuditLog(
+      {
         workspacePath: params.workspacePath,
         workspaceIdentity: params.workspaceIdentity,
         activatedSkillNames,
-      });
-      return {
-        prompt: `${params.prompt}\n\n${buildActivatedSkillsPromptBlock(activatedSkills)}`,
-        activatedSkillNames,
-      };
-    },
+      },
+      skillAccess,
+    );
+    return {
+      prompt: `${params.prompt}\n\n${buildActivatedSkillsPromptBlock(activatedSkills)}`,
+      activatedSkillNames,
+    };
+  };
 
-    async copyToCommon(params: {
-      workspacePath: string;
-      workspaceIdentity?: string;
-      skillId: string;
-    }): Promise<{ newPath: string }> {
-      // 从所有 provider 扫描结果中找目标 skill（list 已经扫过全量路径）
-      const { skills } = await this.list({
+  const copyToCommonRaw = async (
+    params: Parameters<ISkillsService["copyToCommon"]>[0],
+    skillAccess?: SkillAccess,
+  ): Promise<{ newPath: string }> => {
+    // 从所有 provider 扫描结果中找目标 skill（list 已经扫过全量路径）
+    const { skills } = await listRaw(
+      {
         workspacePath: params.workspacePath,
         workspaceIdentity: params.workspaceIdentity,
-      });
-      const skill = skills.find((s) => s.id === params.skillId);
-      if (!skill) {
-        throw new Error(`Skill not found: ${params.skillId}`);
-      }
-      const sourceDir = dirname(skill.path);
-      // 通用目录根据 skill 原 scope 确定 user 还是 workspace 级
-      const commonRoot =
-        skill.scope === "workspace"
-          ? getWorkspaceZcodeSkillRoot(params.workspacePath)
-          : getUserZcodeSkillRoot();
-      const targetDir = join(commonRoot, basename(sourceDir));
-      // 不覆盖已有目录
-      if (await exists(targetDir)) {
-        throw new Error(`通用目录已存在同名技能: ${basename(sourceDir)}`);
-      }
-      await mkdir(commonRoot, { recursive: true });
-      await cp(sourceDir, targetDir, { recursive: true });
-      return { newPath: join(targetDir, SKILL_FILE_NAME) };
-    },
+      },
+      skillAccess,
+    );
+    const skill = skills.find((s) => s.id === params.skillId);
+    if (!skill) {
+      throw new Error(`Skill not found: ${params.skillId}`);
+    }
+    const sourceDir = dirname(skill.path);
+    // 通用目录根据 skill 原 scope 确定 user 还是 workspace 级
+    const commonRoot =
+      skill.scope === "workspace"
+        ? getWorkspaceZcodeSkillRoot(params.workspacePath)
+        : getUserZcodeSkillRoot();
+    const targetDir = join(commonRoot, basename(sourceDir));
+    // 不覆盖已有目录
+    if (await exists(targetDir, skillAccess)) {
+      throw new Error(`通用目录已存在同名技能: ${basename(sourceDir)}`);
+    }
+    await skillIO(skillAccess, () => mkdir(commonRoot, { recursive: true }));
+    if (skillAccess) await copyManagedSkillDirectory(sourceDir, targetDir, skillAccess);
+    else await cp(sourceDir, targetDir, { recursive: true });
+    return { newPath: join(targetDir, SKILL_FILE_NAME) };
+  };
 
-    async removeFromCommon(params: {
-      workspacePath: string;
-      workspaceIdentity?: string;
-      skillId: string;
-    }): Promise<void> {
-      const { skills } = await this.list({
+  const removeFromCommonRaw = async (
+    params: Parameters<ISkillsService["removeFromCommon"]>[0],
+    skillAccess?: SkillAccess,
+  ): Promise<void> => {
+    const { skills } = await listRaw(
+      {
         workspacePath: params.workspacePath,
         workspaceIdentity: params.workspaceIdentity,
-      });
-      const skill = skills.find((s) => s.id === params.skillId);
-      if (!skill) {
-        throw new Error(`Skill not found: ${params.skillId}`);
-      }
-      const normalizedPath = skill.path.replaceAll("\\", "/").toLowerCase();
-      const userCommonRoot = getUserZcodeSkillRoot().replaceAll("\\", "/").toLowerCase();
-      const workspaceCommonRoot = getWorkspaceZcodeSkillRoot(params.workspacePath)
-        .replaceAll("\\", "/")
-        .toLowerCase();
-      const inUserCommon = normalizedPath.includes(`${userCommonRoot}/`);
-      const inWorkspaceCommon = normalizedPath.includes(`${workspaceCommonRoot}/`);
-      if (!inUserCommon && !inWorkspaceCommon) {
-        throw new Error("该技能不在通用目录中");
-      }
-      await rm(dirname(skill.path), { recursive: true, force: true });
-    },
+      },
+      skillAccess,
+    );
+    const skill = skills.find((s) => s.id === params.skillId);
+    if (!skill) {
+      throw new Error(`Skill not found: ${params.skillId}`);
+    }
+    const normalizedPath = skill.path.replaceAll("\\", "/").toLowerCase();
+    const userCommonRoot = getUserZcodeSkillRoot().replaceAll("\\", "/").toLowerCase();
+    const workspaceCommonRoot = getWorkspaceZcodeSkillRoot(params.workspacePath)
+      .replaceAll("\\", "/")
+      .toLowerCase();
+    const inUserCommon = normalizedPath.includes(`${userCommonRoot}/`);
+    const inWorkspaceCommon = normalizedPath.includes(`${workspaceCommonRoot}/`);
+    if (!inUserCommon && !inWorkspaceCommon) {
+      throw new Error("该技能不在通用目录中");
+    }
+    await skillIO(skillAccess, () => rm(dirname(skill.path), { recursive: true, force: true }));
+  };
 
-    async deleteSkill(params: {
-      workspacePath: string;
-      workspaceIdentity?: string;
-      skillId: string;
-    }): Promise<void> {
-      const { skills } = await this.list({
+  const deleteSkillRaw = async (
+    params: Parameters<ISkillsService["deleteSkill"]>[0],
+    skillAccess?: SkillAccess,
+  ): Promise<void> => {
+    const { skills } = await listRaw(
+      {
         workspacePath: params.workspacePath,
         workspaceIdentity: params.workspaceIdentity,
-      });
-      const skill = skills.find((s) => s.id === params.skillId);
-      if (!skill) {
-        throw new Error(`Skill not found: ${params.skillId}`);
-      }
-      // plugin 作用域的技能由其所属插件管理，应通过卸载插件移除，这里拒绝单独删除。
-      if (skill.scope === "plugin") {
-        throw new Error("插件提供的技能不可单独删除，请卸载对应插件");
-      }
+      },
+      skillAccess,
+    );
+    const skill = skills.find((s) => s.id === params.skillId);
+    if (!skill) {
+      throw new Error(`Skill not found: ${params.skillId}`);
+    }
+    // plugin 作用域的技能由其所属插件管理，应通过卸载插件移除，这里拒绝单独删除。
+    if (skill.scope === "plugin") {
+      throw new Error("插件提供的技能不可单独删除，请卸载对应插件");
+    }
 
-      // 用发现阶段命中的原始路径（sourcePath，未 realpath）定位技能目录项。
-      // 软链导入的技能 skill.path 是 realpath 后的目标文件，dirname 会指向目标目录；
-      // sourcePath 才指向 `~/.zcode/skills/<name>` 下的目录项本身。
-      const skillDir = dirname(skill.sourcePath ?? skill.path);
-      const skillLeafName = basename(skillDir);
-      // 只解析父目录，不解析叶子本身：
-      // - 叶子若是软链（正常导入场景），保持不解析，删除时才只删链接、不动目标；
-      // - 父目录 realpath 后，任何“软链/junction 祖先”都会被展开到真实位置，
-      //   随后越界校验就能拦住“经由祖先软链删到受控根之外”的数据丢失路径。
-      const canonicalParent = await realpath(dirname(skillDir)).catch(() => null);
-      if (!canonicalParent) {
-        throw new Error(`该技能不可删除: ${skill.path}`);
-      }
+    // 用发现阶段命中的原始路径（sourcePath，未 realpath）定位技能目录项。
+    // 软链导入的技能 skill.path 是 realpath 后的目标文件，dirname 会指向目标目录；
+    // sourcePath 才指向 `~/.zcode/skills/<name>` 下的目录项本身。
+    const skillDir = dirname(skill.sourcePath ?? skill.path);
+    const skillLeafName = basename(skillDir);
+    // 只解析父目录，不解析叶子本身：
+    // - 叶子若是软链（正常导入场景），保持不解析，删除时才只删链接、不动目标；
+    // - 父目录 realpath 后，任何“软链/junction 祖先”都会被展开到真实位置，
+    //   随后越界校验就能拦住“经由祖先软链删到受控根之外”的数据丢失路径。
+    const canonicalParent = await skillIO(skillAccess, () =>
+      realpath(dirname(skillDir)).catch(() => null),
+    );
+    if (!canonicalParent) {
+      throw new Error(`该技能不可删除: ${skill.path}`);
+    }
 
-      // 安全护栏：删除是 `rm -rf` 目录的破坏性操作，仅允许命中受控技能根。
-      // 收集工作区各层级（沿 worktree 向上）的 .zcode/skills 与 .agents/skills，外加用户级两根。
-      const allowedRootCandidates = await resolveAncestorWorkspaceRoots(params.workspacePath);
-      allowedRootCandidates.push(getUserZcodeSkillRoot());
-      allowedRootCandidates.push(getUserAgentsSkillRoot());
+    // 安全护栏：删除是 `rm -rf` 目录的破坏性操作，仅允许命中受控技能根。
+    // 收集工作区各层级（沿 worktree 向上）的 .zcode/skills 与 .agents/skills，外加用户级两根。
+    const allowedRootCandidates = await resolveAncestorWorkspaceRoots(
+      params.workspacePath,
+      skillAccess,
+    );
+    allowedRootCandidates.push(getUserZcodeSkillRoot());
+    allowedRootCandidates.push(getUserAgentsSkillRoot());
 
-      // 用 realpath 后的父目录与 realpath 后的根比较：父目录必须落在（或等于）某个受控根内。
-      // 两侧都 realpath，`/tmp`→`/private/tmp` 这类系统软链会在两侧抵消，不会误判越界。
-      let contained = false;
-      for (const root of allowedRootCandidates) {
-        const canonicalRoot = await realpath(root).catch(() => root);
-        const relativePath = relative(canonicalRoot, canonicalParent);
-        // 父目录等于根（叶子直接位于根下）也是合法的常见场景，故允许 "".
-        if (relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath))) {
-          contained = true;
-          break;
-        }
+    // 用 realpath 后的父目录与 realpath 后的根比较：父目录必须落在（或等于）某个受控根内。
+    // 两侧都 realpath，`/tmp`→`/private/tmp` 这类系统软链会在两侧抵消，不会误判越界。
+    let contained = false;
+    for (const root of allowedRootCandidates) {
+      const canonicalRoot = await skillIO(skillAccess, () => realpath(root).catch(() => root));
+      const relativePath = relative(canonicalRoot, canonicalParent);
+      // 父目录等于根（叶子直接位于根下）也是合法的常见场景，故允许 "".
+      if (relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath))) {
+        contained = true;
+        break;
       }
+    }
 
-      if (!contained) {
-        throw new Error(`该技能不可删除: ${skill.path}`);
-      }
-      // 删除 `<真实父目录>/<叶子名>`：父目录已是真实路径，不会经由祖先软链穿越；
-      // 叶子仍是原目录项，是软链就只删链接、是普通目录就整目录删除。
-      await rm(join(canonicalParent, skillLeafName), {
+    if (!contained) {
+      throw new Error(`该技能不可删除: ${skill.path}`);
+    }
+    // 删除 `<真实父目录>/<叶子名>`：父目录已是真实路径，不会经由祖先软链穿越；
+    // 叶子仍是原目录项，是软链就只删链接、是普通目录就整目录删除。
+    await skillIO(skillAccess, () =>
+      rm(join(canonicalParent, skillLeafName), {
         recursive: true,
         force: true,
+      }),
+    );
+  };
+
+  return {
+    list(params) {
+      const captured = structuredClone(params);
+      return run((skillAccess) => listRaw(captured, skillAccess), true);
+    },
+    setEnabled(params) {
+      const captured = structuredClone(params);
+      // 同步预留唯一队列位置；准入先失败的后继也必须等前驱物理IO落定，不能放行第三次写。
+      const previous = writeQueue;
+      const task = run(async (skillAccess) => {
+        await previous;
+        await skillAccess?.checkpoint();
+        await setEnabledRaw(captured, skillAccess);
       });
+      const queued = task.finally(() => previous);
+      writeQueue = queued.catch(() => {});
+      return queued;
+    },
+    buildPromptContext(params) {
+      const captured = structuredClone(params);
+      return run((skillAccess) => buildPromptContextRaw(captured, skillAccess), true);
+    },
+    copyToCommon(params) {
+      const captured = structuredClone(params);
+      return run((skillAccess) => copyToCommonRaw(captured, skillAccess));
+    },
+    removeFromCommon(params) {
+      const captured = structuredClone(params);
+      return run((skillAccess) => removeFromCommonRaw(captured, skillAccess));
+    },
+    deleteSkill(params) {
+      const captured = structuredClone(params);
+      return run((skillAccess) => deleteSkillRaw(captured, skillAccess));
     },
   };
 }

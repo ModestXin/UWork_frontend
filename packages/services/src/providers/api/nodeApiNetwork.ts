@@ -1,3 +1,4 @@
+import type { ApiRequestInit } from "@zcode/shared";
 import { readFile } from "node:fs/promises";
 import { rootCertificates } from "node:tls";
 import { Agent, ProxyAgent, fetch as undiciFetch, type Dispatcher } from "undici";
@@ -118,6 +119,13 @@ export function createHostApiNetworkTransport(
       throw new Error("Host API network transport has been disposed");
     }
     const requestGeneration = generation;
+    const { beforeDispatch, ...requestInit } = (init ?? {}) as ApiRequestInit;
+    const guard = async (url: string) => {
+      await beforeDispatch?.(url);
+      requestInit.signal?.throwIfAborted();
+      if (disposed || generation !== requestGeneration)
+        throw new Error("Host API network transport has been disposed");
+    };
     if (!optionsPromise) {
       // 设置读取失败只影响当前请求；清掉 rejected promise，避免一次瞬时 IPC/启动竞态
       // 把 Host API 永久锁死，同时仍保持失败请求不回退到直连。
@@ -136,7 +144,9 @@ export function createHostApiNetworkTransport(
       throw new Error(route.reason);
     }
     if (route.kind === "direct" && !options.caCertPath) {
-      return globalThis.fetch(input as Parameters<typeof fetch>[0], init);
+      // 代理设置读取也是异步边界，必须在真正出口重新裁决并去掉Host本地回调。
+      await guard(requestUrl);
+      return globalThis.fetch(input as Parameters<typeof fetch>[0], requestInit);
     }
 
     const dispatcherKey = `${route.kind}:${route.kind === "proxy" ? route.proxyUrl : "direct"}:${options.caCertPath ?? ""}`;
@@ -183,10 +193,12 @@ export function createHostApiNetworkTransport(
     if (disposed || generation !== requestGeneration) {
       throw new Error("Host API network transport has been disposed");
     }
+    // CA/dispatcher 初始化后仍可能已撤权；不能只在NodeApiClient上层检查。
+    await guard(requestUrl);
     return fetchWithDispatcher(
       input as unknown as string,
       {
-        ...init,
+        ...requestInit,
         dispatcher,
       } as Omit<RequestInit, "dispatcher"> & { dispatcher: Dispatcher },
     );

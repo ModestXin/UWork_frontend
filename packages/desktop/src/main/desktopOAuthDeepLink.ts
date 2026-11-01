@@ -21,6 +21,7 @@ import { registerLinuxDeepLinkProtocol } from "./desktopLinuxDeepLinkRegistratio
 
 interface DeepLinkWorkspaceGateOptions {
   confirmationCopy?: ExternalWorkspaceOpenDialogCopy;
+  isRequestActive?: () => boolean;
   /** 业务窗口解析器；必须排除 CUA indicator 等 Main 辅助窗口。 */
   resolveApplicationWindow?: () => BrowserWindow | null;
 }
@@ -157,30 +158,54 @@ export function resolveExternalWorkspaceOpenDialogCopy(
   };
 }
 
+// Main 是确认序列的唯一 owner；异步原生对话框未决时仍须接收后续 singleton 通知并写 ACK。
+let workspaceConfirmationTail: Promise<void> = Promise.resolve();
+
+export function isExternalWorkspaceOpenRequestActive(
+  parentWindow: BrowserWindow | null,
+  isRequestActive: () => boolean = () => true,
+): boolean {
+  return (
+    isRequestActive() &&
+    (!parentWindow || (!parentWindow.isDestroyed() && !parentWindow.webContents.isDestroyed()))
+  );
+}
+
 export function confirmExternalWorkspaceOpen(
   path: string,
   logger: { warn: (...args: unknown[]) => void },
   parentWindow: BrowserWindow | null,
   copy: ExternalWorkspaceOpenDialogCopy = resolveExternalWorkspaceOpenDialogCopy("en-US"),
-): boolean {
-  const options = {
-    type: "warning" as const,
-    buttons: copy.buttons,
-    defaultId: 1,
-    cancelId: 1,
-    title: copy.title,
-    message: copy.message,
-    detail: copy.detail(path),
-    noLink: true,
-  };
-  const response = parentWindow
-    ? dialog.showMessageBoxSync(parentWindow, options)
-    : dialog.showMessageBoxSync(options);
-  const confirmed = response === 0;
-  if (!confirmed) {
-    logger.warn("[deep-link] 用户取消打开外部链接工作区", { path });
-  }
-  return confirmed;
+  isRequestActive: () => boolean = () => true,
+): Promise<boolean> {
+  const isCurrent = () => isExternalWorkspaceOpenRequestActive(parentWindow, isRequestActive);
+  const confirmation = workspaceConfirmationTail.then(async () => {
+    if (!isCurrent()) return false;
+    const options = {
+      type: "warning" as const,
+      buttons: copy.buttons,
+      defaultId: 1,
+      cancelId: 1,
+      title: copy.title,
+      message: copy.message,
+      detail: copy.detail(path),
+      noLink: true,
+    };
+    try {
+      const { response } = parentWindow
+        ? await dialog.showMessageBox(parentWindow, options)
+        : await dialog.showMessageBox(options);
+      // 确认等待期间窗口可能销毁或应用开始退出；旧允许不得投递到新的窗口。
+      if (!isCurrent()) return false;
+      if (response !== 0) logger.warn("[deep-link] 用户取消打开外部链接工作区", { path });
+      return response === 0;
+    } catch (error) {
+      logger.warn("[deep-link] 外部工作区确认失败，已忽略", error);
+      return false;
+    }
+  });
+  workspaceConfirmationTail = confirmation.then(() => undefined);
+  return confirmation;
 }
 
 export function handleOpenWorkspacePath(
@@ -269,18 +294,28 @@ export function handleDeepLink(
     const targetWindow = options.resolveApplicationWindow
       ? options.resolveApplicationWindow()
       : (BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0] ?? null);
-    // zcode://workspace/open 来自浏览器/IM 等外部应用，不能等同于用户在
-    // ZCode 内部选择目录；确认必须发生在 statSync 之前，避免项目配置被静默信任。
-    if (
-      !confirmExternalWorkspaceOpen(workspacePath, logger, targetWindow, options.confirmationCopy)
-    ) {
-      return true;
-    }
-
-    return handleOpenWorkspacePath(workspacePath, logger, {
-      allowWithoutReadyWindow: true,
-      resolveApplicationWindow: options.resolveApplicationWindow,
-    });
+    // 外部 URL 先返回 consumed，让 singleton 写 ACK；只有异步确认成功后才探测目录并投递。
+    // 固定发起窗口，不能在等待期间因焦点变化把允许结果路由到另一业务窗口。
+    void confirmExternalWorkspaceOpen(
+      workspacePath,
+      logger,
+      targetWindow,
+      options.confirmationCopy,
+      options.isRequestActive,
+    )
+      .then((confirmed) => {
+        if (
+          !confirmed ||
+          !isExternalWorkspaceOpenRequestActive(targetWindow, options.isRequestActive)
+        )
+          return;
+        handleOpenWorkspacePath(workspacePath, logger, {
+          allowWithoutReadyWindow: true,
+          resolveApplicationWindow: () => targetWindow,
+        });
+      })
+      .catch((error) => logger.warn("[deep-link] 确认后的工作区投递失败，已忽略", error));
+    return true;
   }
 
   if (isPaymentCallbackUrl(parsedUrl)) {

@@ -301,7 +301,8 @@ export function mapSessionInfo(input: {
     createdAt;
   return {
     createdAt,
-    mode: input.projection?.mode ?? input.app?.getMode?.() ?? "build",
+    // 活跃 runtime 已接收创建/切模配置；零事件投影的 build 缺省不能覆盖实际权限模式。
+    mode: input.app?.getMode?.() ?? input.projection?.mode ?? "build",
     model: input.app ? optionalModelSelectionFromString(input.app.getModel()) : undefined,
     parentSessionId: input.session?.parentID ?? input.parentSessionId,
     traceId: input.session?.traceID ?? input.app?.traceId,

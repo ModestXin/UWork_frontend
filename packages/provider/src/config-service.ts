@@ -10,12 +10,14 @@ import type {
 } from "./config/index.js";
 import {
   ApiKeyAccessConfig,
+  EnterpriseSessionAccessConfig,
   ModelConfig,
   ProviderConfigMap,
   ProviderApiConfig,
   ProviderConfig as ProviderConfigValue,
   ProviderTemplateMap,
   resolveProviderTemplateName,
+  parseProviderConfig,
 } from "./config/index.js";
 import { resolveOwnedOrder } from "./owned-order.js";
 import {
@@ -69,6 +71,14 @@ export interface UcasEndpointSource {
 /** 企业网关写入 UCAS 的入参；`apiKey` 缺省表示只同步 Base URL。 */
 export interface UcasGatewayConfigInput {
   readonly baseUrl: string;
+  /** 私有撤销命令：仅清锁内仍为企业会话的派生候选，不重建连接或覆盖偏好。 */
+  readonly clearManagedCatalog?: true;
+  readonly authMode?: "enterprise-session";
+  /** 私有Gateway当前目录的派生候选；不是授权，缺省在企业模式中fail closed。 */
+  readonly enterpriseModelIds?: readonly string[];
+  readonly enterpriseModelNames?: Readonly<Record<string, string>>;
+  /** Host私有准入回调，不持久化/不接受公共JSON自报。 */
+  readonly isCurrent?: () => boolean;
   readonly apiKey?: string;
   /** 仅显式替换才覆盖用户已有密钥；默认只补缺失。 */
   readonly replaceApiKey?: boolean;
@@ -195,6 +205,8 @@ export class ProviderConfigService implements ProviderSource<ProviderConfigSnaps
     metadata?: Pick<ProviderConfigRule, "providerName" | "templateId" | "enabled">,
   ): Promise<ProviderConfigLayerSnapshot> {
     assertNonEmptyId("providerId", providerId);
+    if (config.enterpriseModelNames !== undefined)
+      throw new Error("enterprise_session_private_only");
     const zcodeBuiltin = await this.#zcodeBuiltinSource.read();
     const ucasBaseUrl = await this.#resolveUcasBaseUrl();
     return this.#updatePersonal((current) => {
@@ -319,28 +331,78 @@ export class ProviderConfigService implements ProviderSource<ProviderConfigSnaps
 
   /** 企业网关写入边界：Base URL 采用网关解析值；Key 只在缺失或显式替换时写入，保留其它字段。 */
   applyUcasGatewayConfig(input: UcasGatewayConfigInput): Promise<UcasGatewayConfigApplication> {
+    if (input.clearManagedCatalog && !input.isCurrent)
+      throw new Error("enterprise_identity_changed");
     const baseUrl = normalizeUcasGatewayBaseUrl(input.baseUrl);
     const apiKey = input.apiKey?.trim();
+    const enterpriseSession = input.authMode === "enterprise-session";
+    if (enterpriseSession && (input.apiKey !== undefined || input.replaceApiKey))
+      throw new Error("企业会话配置不接受 API Key");
     if (input.apiKey !== undefined && !apiKey) throw new Error("UCAS API Key 不能为空");
+    const enterpriseModelIds = enterpriseSession
+      ? [...new Set((input.enterpriseModelIds ?? []).map((id) => normalizeId("modelId", id)))]
+      : undefined;
+    const enterpriseModelNames = enterpriseSession
+      ? parseProviderConfig({ enterpriseModelNames: input.enterpriseModelNames ?? {} })
+          .enterpriseModelNames
+      : undefined;
+    if (
+      enterpriseModelNames &&
+      Object.keys(enterpriseModelNames).some((id) => !enterpriseModelIds?.includes(id))
+    )
+      throw new Error("Invalid managed Gateway model names");
     let apiKeyApplied = false;
     return this.#updatePersonal((current) => {
+      // 锁内才是实际写入准入点，旧拒绝结果不能迟到清空新身份的目录。
+      if (input.isCurrent && !input.isCurrent()) throw new Error("enterprise_identity_changed");
       const rule = current.providers.getRule(UCAS_PROVIDER_ID);
+      if (input.clearManagedCatalog) {
+        // 退出期间用户可能已切到普通 API-key；撤销旧目录不能把当前连接改回企业模式。
+        if (rule?.config.access?.type !== "enterprise-session") return current;
+        return {
+          providers: current.providers.setRule({
+            ...rule,
+            config: rule.config.overlay(
+              new ProviderConfigValue({ enterpriseModelIds: [], enterpriseModelNames: {} }),
+            ),
+          }),
+          models: current.models,
+          providerOrder: current.providerOrder,
+        };
+      }
       if (rule?.templateId !== UCAS_PROVIDER_TEMPLATE_ID) {
         throw new Error("UCAS 默认供应商不可用");
       }
       const access = rule.config.access;
-      if (access != null && access.type !== "api-key") {
+      if (access != null && access.type !== "api-key" && access.type !== "enterprise-session") {
         throw new Error("UCAS API Key 配置类型无效");
       }
-      apiKeyApplied = Boolean(apiKey) && (input.replaceApiKey === true || !access?.apiKey?.trim());
-      const nextAccess = apiKeyApplied ? new ApiKeyAccessConfig({ apiKey }) : access;
-      const api = rule.config.api
-        ? rule.config.api.overlay(new ProviderApiConfig({ baseUrl }))
-        : new ProviderApiConfig({ type: UCAS_API_TYPE, baseUrl });
+      apiKeyApplied =
+        !enterpriseSession &&
+        Boolean(apiKey) &&
+        (input.replaceApiKey === true || access?.type !== "api-key" || !access.apiKey?.trim());
+      // 复用同一原子写者迁移访问方式；旧终端凭据不能留在 Provider 或另写一份会话。
+      const nextAccess = enterpriseSession
+        ? new EnterpriseSessionAccessConfig()
+        : apiKeyApplied
+          ? new ApiKeyAccessConfig({ apiKey })
+          : access;
+      const api = enterpriseSession
+        ? new ProviderApiConfig({ type: UCAS_API_TYPE, baseUrl, headers: null })
+        : rule.config.api
+          ? rule.config.api.overlay(new ProviderApiConfig({ baseUrl }))
+          : new ProviderApiConfig({ type: UCAS_API_TYPE, baseUrl });
       const config = rule.config.overlay(
         new ProviderConfigValue({
           access: nextAccess ?? new ApiKeyAccessConfig(),
           api,
+          ...(enterpriseSession
+            ? {
+                enterpriseModelIds,
+                // 名称与成员在同一锁内整体替换；缺名/清空不能继承旧owner的label。
+                enterpriseModelNames,
+              }
+            : {}),
         }),
       );
       return {
@@ -427,17 +489,22 @@ export class ProviderConfigService implements ProviderSource<ProviderConfigSnaps
         Boolean(access.apiKey?.trim()),
       );
       const access =
-        currentConfig?.access?.type === "api-key" && currentConfig.access.apiKey?.trim()
+        currentConfig?.access?.type === "enterprise-session"
           ? currentConfig.access
-          : (aliasAccessWithKey ??
-            (currentConfig?.access?.type === "api-key"
-              ? currentConfig.access
-              : (aliasAccessConfigs[0] ?? new ApiKeyAccessConfig())));
-      const headers = Object.assign(
-        {},
-        ...aliasConfigs.map(({ config }) => config.api?.headers ?? {}),
-        currentConfig?.api?.headers ?? {},
-      );
+          : currentConfig?.access?.type === "api-key" && currentConfig.access.apiKey?.trim()
+            ? currentConfig.access
+            : (aliasAccessWithKey ??
+              (currentConfig?.access?.type === "api-key"
+                ? currentConfig.access
+                : (aliasAccessConfigs[0] ?? new ApiKeyAccessConfig())));
+      const headers =
+        access.type === "enterprise-session"
+          ? {}
+          : Object.assign(
+              {},
+              ...aliasConfigs.map(({ config }) => config.api?.headers ?? {}),
+              currentConfig?.api?.headers ?? {},
+            );
       const config = new ProviderConfigValue({
         group: "standard-personal",
         logo: currentConfig?.logo ?? aliasConfigs.find(({ config }) => config.logo)?.config.logo,
@@ -448,6 +515,8 @@ export class ProviderConfigService implements ProviderSource<ProviderConfigSnaps
           ...(Object.keys(headers).length === 0 ? {} : { headers }),
         }),
         personalModelIds,
+        enterpriseModelIds: currentConfig?.enterpriseModelIds,
+        enterpriseModelNames: currentConfig?.enterpriseModelNames,
         modelOrder,
         visibility: "visible",
       });
@@ -528,6 +597,8 @@ export class ProviderConfigService implements ProviderSource<ProviderConfigSnaps
   async createPersonalProvider(
     input: CreatePersonalProviderInput = {},
   ): Promise<PersonalProviderCreation> {
+    if (input.initialConfig?.enterpriseModelNames !== undefined)
+      throw new Error("enterprise_session_private_only");
     const zcodeBuiltin = await this.#zcodeBuiltinSource.read();
     const templateId = input.templateId?.trim();
     const template = templateId ? zcodeBuiltin.providerTemplates?.get(templateId) : undefined;
